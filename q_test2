@@ -18,15 +18,50 @@ Then:
 from optimum.onnxruntime import ORTModelForCausalLM
 
 # Export with memory optimizations
+# 2. Export with external data format
 ort_model = ORTModelForCausalLM.from_pretrained(
-    "codellama-7b-instruct-fp16",
+    model_id,
     export=True,
     provider="CPUExecutionProvider",
-    use_external_data_format=True,
-    max_size_mb=1024,  # Split into 1GB chunks
+    # These are the correct parameters for large models:
+    use_external_data_format=True,  # Must be inside session_options
     session_options={
+        "use_external_data_format": True,  # Required for >2GB models
         "optimized_model_filepath": "codellama-7b-instruct.onnx",
-        "enable_profiling": False  # Disable to save space
+        "log_severity_level": 3  # Reduce logging verbosity
+    }
+)
+
+Alternative approach:
+from optimum.onnxruntime import ORTModelForCausalLM, ORTConfig
+
+# Create configuration first
+ort_config = ORTConfig(
+    use_external_data_format=True,
+    max_export_size=1024,  # MB per file
+    optimization_level=1,
+    provider="CPUExecutionProvider"
+)
+
+# Then export
+ort_model = ORTModelForCausalLM.from_pretrained(
+    model_id,
+    export=True,
+    ort_config=ort_config
+)
+
+from onnxruntime.quantization import quantize_dynamic, QuantType
+
+Quantization with External Data
+quantize_dynamic(
+    model_input="codellama-7b-instruct/model.onnx",
+    model_output="codellama-7b-instruct-quant/model_quant.onnx",
+    weight_type=QuantType.QInt8,
+    use_external_data_format=True,  # Must match export setting
+    extra_options={
+        "WeightSymmetric": True,
+        "ActivationSymmetric": False,
+        "UseExternalDataFormat": True  # Additional confirmation
     }
 )
 
