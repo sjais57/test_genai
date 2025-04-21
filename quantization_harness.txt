@@ -1,138 +1,23 @@
-kofrom onnxruntime.quantization import quantize_dynamic, QuantType
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-quantize_dynamic(
-    model_input="distilbert.onnx",
-    model_output="distilbert-quant.onnx",
-    weight_type=QuantType.QInt8
-)
+model_name = "codellama/CodeLlama-7b-Instruct-hf"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", torch_dtype="float32")
 
 
-import onnxruntime as ort
-
-def run_inference(model_path, input_text):
-    ort_session = ort.InferenceSession(model_path)
-    inputs = tokenizer(input_text, return_tensors="np", padding=True)
-    ort_inputs = {k: v for k, v in inputs.items()}
-    outputs = ort_session.run(None, ort_inputs)
-    return outputs
-
-# Compare outputs
-text = "I love this movie!"
-original_out = run_inference("distilbert.onnx", text)
-quantized_out = run_inference("distilbert-quant.onnx", text)
-
-print("Original:", original_out)
-print("Quantized:", quantized_out)
-
-
-🧪 Optional: Add Cosine Similarity
-from scipy.spatial.distance import cosine
-
-score = 1 - cosine(original_out[0][0], quantized_out[0][0])
-print("Cosine Similarity:", score)
-
-
-🧠 Example: Inspect Weights of a Hugging Face Model
-
-from transformers import AutoModel
-
-model = AutoModel.from_pretrained("bert-base-uncased")
-
-# Accessing weight tensors of a specific layer
-for name, param in model.named_parameters():
-    if param.requires_grad:
-        print(f"{name} - dtype: {param.dtype} - shape: {param.shape}")
-        print(param.data[:2])  # print sample weights
-
-output: encoder.layer.0.attention.self.query.weight - dtype: torch.float32
-
-
-🔍 2. Checking Activations (Intermediate Outputs)
 import torch
+from torch.quantization import quantize_dynamic
 
-activations = {}
-
-def get_activation(name):
-    def hook(model, input, output):
-        activations[name] = output.detach()
-    return hook
-
-# Example: hook into BERT’s first encoder layer
-layer = model.encoder.layer[0].output
-layer.register_forward_hook(get_activation("layer0_output"))
-
-
-🧪 Run a Forward Pass
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-inputs = tokenizer("hello world", return_tensors="pt")
-
-with torch.no_grad():
-    _ = model(**inputs)
-
-# Check activations
-print("Activation dtype:", activations["layer0_output"].dtype)
-print("Activation sample:", activations["layer0_output"][0, :2, :4])  # batch x tokens x features
-
-
-torch.save(activations["layer0_output"], "fp32_activations.pt")
-torch.save(model.state_dict(), "fp32_weights.pt")
-
-+++
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-# Configuration for 8-bit quantization
-bnb_config = BitsAndBytesConfig(
-    load_in_8bit=True,  # Enable 8-bit quantization
-    llm_int8_threshold=6.0,  # Threshold for outlier detection (default)
+quantized_model = quantize_dynamic(
+    model,  # the original model
+    {torch.nn.Linear},  # layers to quantize
+    dtype=torch.qint8  # quantization type
 )
 
-# Load CodeLlama-7B (replace with larger variants if needed)
-model_id = "codellama/CodeLlama-7b-hf"
-
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    quantization_config=bnb_config,  # Apply 8-bit quantization
-    device_map="auto",  # Automatically offload to CPU
-    torch_dtype=torch.float16,  # Fallback dtype (not used for 8-bit)
-)
-
-input_text = "def factorial(n):"
-inputs = tokenizer(input_text, return_tensors="pt").to("cpu")  # Force CPU
-
-# Generate code
-outputs = model.generate(
-    inputs.input_ids,
-    max_length=100,
-    temperature=0.7,
-)
+prompt = "def hello_world():\n    print('Hello"
+inputs = tokenizer(prompt, return_tensors="pt").to("cpu")
+outputs = quantized_model.generate(**inputs, max_new_tokens=20)
 print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
-++++
-from transformers import AutoModelForCausalLM, AutoConfig
-import torch.nn as nn
-import torch
-
-class QuantizedLinear(nn.Module):
-    def __init__(self, original_layer):
-        super().__init__()
-        self.weight = torch.quantize_per_tensor(
-            original_layer.weight.data, 
-            scale=0.1, 
-            zero_point=0, 
-            dtype=torch.qint8
-        )
-        if original_layer.bias is not None:
-            self.bias = original_layer.bias.data
-
-    def forward(self, x):
-        return nn.functional.linear(x, self.weight.dequantize(), self.bias)
-
-# Load and manually quantize layers
-model = AutoModelForCausalLM.from_pretrained("codellama/CodeLlama-7b-hf", device_map="cpu")
-
-for name, module in model.named_children():
-    if isinstance(module, nn.Linear):
-        setattr(model, name, QuantizedLinear(module))
+quantized_model.save_pretrained("codellama-7b-instruct-quantized")
+tokenizer.save_pretrained("codellama-7b-instruct-quantized")
