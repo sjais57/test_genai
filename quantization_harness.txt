@@ -46,3 +46,45 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 quantized_model.save_pretrained("codellama-7b-instruct-quantized")
 tokenizer.save_pretrained("codellama-7b-instruct-quantized")
+
+
+
+==============================================
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from torch.quantization import quantize_dynamic
+import os
+
+# Choose CPU and use float32 first
+device = torch.device("cpu")
+model_name = "codellama/CodeLlama-7b-Instruct-hf"
+
+print("Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+print("Loading model in float32 (unquantized)...")
+model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
+model.to(device)
+
+print("Applying dynamic quantization...")
+# Quantize Linear layers (most effective on CPUs)
+quantized_model = quantize_dynamic(
+    model, 
+    {torch.nn.Linear}, 
+    dtype=torch.qint8
+)
+
+print("Saving quantized model...")
+save_path = "./codellama-7b-instruct-quantized"
+os.makedirs(save_path, exist_ok=True)
+quantized_model.save_pretrained(save_path)
+tokenizer.save_pretrained(save_path)
+
+print("Quantized model saved at:", save_path)
+
+# Optional test
+prompt = "def merge_sort(arr):"
+inputs = tokenizer(prompt, return_tensors="pt").to(device)
+outputs = quantized_model.generate(**inputs, max_new_tokens=40)
+print("\nGenerated:\n", tokenizer.decode(outputs[0], skip_special_tokens=True))
+
