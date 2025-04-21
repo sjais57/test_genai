@@ -110,3 +110,29 @@ outputs = model.generate(
 )
 print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
+++++
+from transformers import AutoModelForCausalLM, AutoConfig
+import torch.nn as nn
+import torch
+
+class QuantizedLinear(nn.Module):
+    def __init__(self, original_layer):
+        super().__init__()
+        self.weight = torch.quantize_per_tensor(
+            original_layer.weight.data, 
+            scale=0.1, 
+            zero_point=0, 
+            dtype=torch.qint8
+        )
+        if original_layer.bias is not None:
+            self.bias = original_layer.bias.data
+
+    def forward(self, x):
+        return nn.functional.linear(x, self.weight.dequantize(), self.bias)
+
+# Load and manually quantize layers
+model = AutoModelForCausalLM.from_pretrained("codellama/CodeLlama-7b-hf", device_map="cpu")
+
+for name, module in model.named_children():
+    if isinstance(module, nn.Linear):
+        setattr(model, name, QuantizedLinear(module))
