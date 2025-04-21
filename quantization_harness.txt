@@ -16,6 +16,31 @@ quantized_model = quantize_dynamic(
 
 prompt = "def hello_world():\n    print('Hello"
 inputs = tokenizer(prompt, return_tensors="pt").to("cpu")
+
+
+=========================
+import onnx
+from onnxruntime.quantization import quantize_dynamic, QuantType
+
+# Step 1: Load your ONNX model to verify it's valid
+onnx_model = onnx.load("codellama-7b-onnx/model.onnx")
+onnx.checker.check_model(onnx_model)
+
+# Step 2: Quantize with correct parameters
+quantize_dynamic(
+    model_input="codellama-7b-onnx/model.onnx",
+    model_output="codellama-7b-onnx-quantized/model_quant.onnx",
+    weight_type=QuantType.QInt8,
+    per_channel=False,  # Important for LLMs
+    optimize_model=False,  # Some versions accept this
+    extra_options={
+        "WeightSymmetric": True,
+        "ActivationSymmetric": False,
+        "EnableSubgraph": True  # Helps with transformer models
+    }
+)
+
+print("Quantization completed successfully!")
 outputs = quantized_model.generate(**inputs, max_new_tokens=20)
 print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
