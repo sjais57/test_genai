@@ -1,0 +1,61 @@
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "codellama/CodeLlama-7b-Instruct-hf"
+
+# Load in FP16 to reduce memory pressure
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.float16,  # Critical for memory reduction
+    low_cpu_mem_usage=True,
+    device_map="cpu"
+)
+
+# Save as FP16
+model.save_pretrained("codellama-7b-instruct-fp16", torch_dtype=torch.float16)
+
+
+Then:
+from optimum.onnxruntime import ORTModelForCausalLM
+
+# Export with memory optimizations
+ort_model = ORTModelForCausalLM.from_pretrained(
+    "codellama-7b-instruct-fp16",
+    export=True,
+    provider="CPUExecutionProvider",
+    use_external_data_format=True,
+    max_size_mb=1024,  # Split into 1GB chunks
+    session_options={
+        "optimized_model_filepath": "codellama-7b-instruct.onnx",
+        "enable_profiling": False  # Disable to save space
+    }
+)
+
+Then:
+from onnxruntime.quantization import quantize_dynamic, QuantType
+import os
+
+# Create output directory
+os.makedirs("codellama-7b-instruct-quantized", exist_ok=True)
+
+quant_config = {
+    "weight_type": QuantType.QInt8,
+    "per_channel": False,
+    "use_external_data_format": True,
+    "extra_options": {
+        "WeightSymmetric": True,
+        "ActivationSymmetric": False,
+        "UseExternalDataFormat": True
+    }
+}
+
+# Process each component separately
+for component in ["model.onnx"]:  # Add other components if split
+    input_path = f"codellama-7b-instruct/{component}"
+    output_path = f"codellama-7b-instruct-quantized/{component}"
+    
+    if os.path.exists(input_path):
+        quantize_dynamic(
+            model_input=input_path,
+            model_output=output_path,
+            **quant_config
+        )
