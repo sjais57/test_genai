@@ -155,3 +155,63 @@ model = AutoModelForCausalLM.from_pretrained(
 inputs = tokenizer("Tell me a joke about llamas", return_tensors="pt").to(model.device)
 outputs = model.generate(**inputs, max_new_tokens=50)
 print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+
+
+
+
+++++++++
+import torch
+import time
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
+model_id = "meta-llama/Meta-Llama-3-8B"
+prompt = "Explain quantum computing in simple terms."
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+
+# -------- Full Precision Model (FP16) --------
+print("Loading full-precision model...")
+model_fp = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.float16,
+    device_map="cuda"
+)
+
+print("Generating with full-precision model...")
+torch.cuda.synchronize()
+start_fp = time.time()
+
+output_fp = model_fp.generate(**inputs, max_new_tokens=100)
+
+torch.cuda.synchronize()
+end_fp = time.time()
+
+print(f"\nFull Precision Output:\n{tokenizer.decode(output_fp[0], skip_special_tokens=True)}")
+print(f"Full Precision Generation Time: {end_fp - start_fp:.2f} seconds")
+
+# -------- INT8 Quantized Model (8-bit) --------
+print("\nLoading 8-bit quantized model...")
+bnb_config = BitsAndBytesConfig(
+    load_in_8bit=True
+)
+
+model_int8 = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    quantization_config=bnb_config,
+    device_map="cuda"
+)
+
+print("Generating with int8 quantized model...")
+torch.cuda.synchronize()
+start_int8 = time.time()
+
+output_int8 = model_int8.generate(**inputs, max_new_tokens=100)
+
+torch.cuda.synchronize()
+end_int8 = time.time()
+
+print(f"\nINT8 Quantized Output:\n{tokenizer.decode(output_int8[0], skip_special_tokens=True)}")
+print(f"INT8 Generation Time: {end_int8 - start_int8:.2f} seconds")
+
