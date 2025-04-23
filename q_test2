@@ -94,3 +94,79 @@ for component in ["model.onnx"]:  # Add other components if split
             model_output=output_path,
             **quant_config
         )
+
+============================
+Testing of gptq model without gptq:
+
+Challenges
+Without auto-gptq, you have to:
+
+Read the quantized weight format (often .safetensors or .pt)
+
+Implement 4-bit matmul
+
+Simulate quantization and dequantization during forward pass:
+
+Code:
+import os
+from safetensors.torch import load_file
+import torch
+from transformers import AutoTokenizer
+import glob
+
+# === CONFIG ===
+MODEL_DIR = "/path/to/llama-3-8b-gptq"  # Update this path
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MAX_NEW_TOKENS = 50
+PROMPT = "The meaning of life is"
+
+# === LOAD TOKENIZER ===
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, use_fast=True)
+
+# === LOAD SAFETENSORS SHARDS ===
+tensor_files = sorted(glob.glob(os.path.join(MODEL_DIR, "*.safetensors")))
+
+print(f"Found {len(tensor_files)} shard files.")
+all_weights = {}
+
+for f in tensor_files:
+    print(f"Loading {f}...")
+    weights = load_file(f, device=DEVICE)
+    all_weights.update(weights)
+
+print("All weights loaded.")
+
+# === PRINT SAMPLE KEYS ===
+print("\nSample keys:", list(all_weights.keys())[:5])
+
+# === DUMMY TEXT GENERATOR USING FINAL LINEAR ===
+# This is NOT full generation - just a simulation for now
+# LLaMA architecture requires full model layers
+
+# Use final lm_head weight to simulate logits
+lm_head_weight = all_weights.get("lm_head.weight")  # (vocab_size, hidden_size)
+if lm_head_weight is None:
+    raise ValueError("lm_head.weight not found in weights!")
+
+lm_head_weight = lm_head_weight.to(DEVICE)
+
+# Fake hidden state for demo
+def generate_tokens(prompt, max_tokens=MAX_NEW_TOKENS):
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+
+    for _ in range(max_tokens):
+        # Dummy hidden state simulation: last token's embedding
+        # You should replace this with real model forward
+        last_token_id = input_ids[:, -1]
+        hidden_fake = torch.randn(1, lm_head_weight.shape[1], device=DEVICE)
+
+        logits = hidden_fake @ lm_head_weight.T  # (1, vocab_size)
+        next_token = torch.argmax(logits, dim=-1)
+
+        input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+
+    return tokenizer.decode(input_ids[0], skip_special_tokens=True)
+
+# === RUN GENERATION ===
+output = generate_tokens(PROMPT)
+print("\nGenerated text:\n", output)
