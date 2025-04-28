@@ -1,217 +1,133 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-model_name = "codellama/CodeLlama-7b-Instruct-hf"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", torch_dtype="float32")
-
-
-import torch
-from torch.quantization import quantize_dynamic
-
-quantized_model = quantize_dynamic(
-    model,  # the original model
-    {torch.nn.Linear},  # layers to quantize
-    dtype=torch.qint8  # quantization type
-)
-
-prompt = "def hello_world():\n    print('Hello"
-inputs = tokenizer(prompt, return_tensors="pt").to("cpu")
-
-
-=========================
-import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType
-
-# Step 1: Load your ONNX model to verify it's valid
-onnx_model = onnx.load("codellama-7b-onnx/model.onnx")
-onnx.checker.check_model(onnx_model)
-
-# Step 2: Quantize with correct parameters
-quantize_dynamic(
-    model_input="codellama-7b-onnx/model.onnx",
-    model_output="codellama-7b-onnx-quantized/model_quant.onnx",
-    weight_type=QuantType.QInt8,
-    per_channel=False,  # Important for LLMs
-    optimize_model=False,  # Some versions accept this
-    extra_options={
-        "WeightSymmetric": True,
-        "ActivationSymmetric": False,
-        "EnableSubgraph": True  # Helps with transformer models
-    }
-)
-
-print("Quantization completed successfully!")
-outputs = quantized_model.generate(**inputs, max_new_tokens=20)
-print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-
-quantized_model.save_pretrained("codellama-7b-instruct-quantized")
-tokenizer.save_pretrained("codellama-7b-instruct-quantized")
-
-
-
-==============================================
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from torch.quantization import quantize_dynamic
-import os
-
-# Choose CPU and use float32 first
-device = torch.device("cpu")
-model_name = "codellama/CodeLlama-7b-Instruct-hf"
-
-print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-print("Loading model in float32 (unquantized)...")
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
-model.to(device)
-
-print("Applying dynamic quantization...")
-# Quantize Linear layers (most effective on CPUs)
-quantized_model = quantize_dynamic(
-    model, 
-    {torch.nn.Linear}, 
-    dtype=torch.qint8
-)
-
-print("Saving quantized model...")
-save_path = "./codellama-7b-instruct-quantized"
-os.makedirs(save_path, exist_ok=True)
-quantized_model.save_pretrained(save_path)
-tokenizer.save_pretrained(save_path)
-
-print("Quantized model saved at:", save_path)
-
-# Optional test
-prompt = "def merge_sort(arr):"
-inputs = tokenizer(prompt, return_tensors="pt").to(device)
-outputs = quantized_model.generate(**inputs, max_new_tokens=40)
-print("\nGenerated:\n", tokenizer.decode(outputs[0], skip_special_tokens=True))
-
-
-
-+++++++
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-
-model_name = "meta-llama/Meta-Llama-3-8B"
-quantized_model_dir = "./llama3-8b-gptq"
-
-# Load model
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype="auto")
-
-# Quantization config
-quantize_config = BaseQuantizeConfig(
-    bits=4,
-    group_size=128,
-    desc_act=False
-)
-
-quantizer = AutoGPTQForCausalLM.from_pretrained(model, quantize_config)
-quantizer.quantize()
-
-quantizer.save_quantized(quantized_model_dir)
-
-
-
-pip install bitsandbytes accelerate
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype="float16",
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4",
-)
-
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Meta-Llama-3-8B",
-    quantization_config=bnb_config,
-    device_map="auto"
-)
-
-
-
-++++++
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_compute_dtype="float16",  # or "bfloat16" if your GPU supports it
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4"          # nf4 is optimized for quality
-)
-
-model_id = "meta-llama/Meta-Llama-3-8B"
-
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    quantization_config=bnb_config,
-    device_map="auto"
-)
-
-# Test
-inputs = tokenizer("Tell me a joke about llamas", return_tensors="pt").to(model.device)
-outputs = model.generate(**inputs, max_new_tokens=50)
-print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-
-
-
-
-++++++++
 import torch
-import time
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
-model_id = "meta-llama/Meta-Llama-3-8B"
-prompt = "Explain quantum computing in simple terms."
+# Your local model path
+model_path = "/path/to/Meta-Llama-3.1-8B-Instruct"
+
+# Load the tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+
+# Load the model on GPU in FP32
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    device_map="auto",             # Automatically put model on GPU
+    torch_dtype=torch.float32       # Explicitly load in FP32
+)
+
+model.eval()
+
+# Prompt for inference
+prompt = "Describe how photosynthesis works."
+
+# Tokenize prompt
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+# Generate output
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=200,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True
+    )
+
+# Decode and print
+response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(response)
+
+
+======
+Half Precision:
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+# Your local model path
+model_path = "/path/to/Meta-Llama-3.1-8B-Instruct"
 
 # Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
 
-# -------- Full Precision Model (FP16) --------
-print("Loading full-precision model...")
-model_fp = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    torch_dtype=torch.float16,
-    device_map="cuda"
+# Load model and automatically cast weights to FP16
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    device_map="auto",
+    torch_dtype=torch.float16,  # <-- important change
 )
 
-print("Generating with full-precision model...")
-torch.cuda.synchronize()
-start_fp = time.time()
+model.eval()
 
-output_fp = model_fp.generate(**inputs, max_new_tokens=100)
+# Prompt
+prompt = "Explain the theory of relativity in simple words."
 
-torch.cuda.synchronize()
-end_fp = time.time()
+# Tokenize
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-print(f"\nFull Precision Output:\n{tokenizer.decode(output_fp[0], skip_special_tokens=True)}")
-print(f"Full Precision Generation Time: {end_fp - start_fp:.2f} seconds")
+# Inference
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=200,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True
+    )
 
-# -------- INT8 Quantized Model (8-bit) --------
-print("\nLoading 8-bit quantized model...")
-bnb_config = BitsAndBytesConfig(
-    load_in_8bit=True
+# Decode
+response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(response)
+
+
+_++++++++++++++=============
+Compare:
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+# Select dtype: torch.float32 or torch.float16
+desired_dtype = torch.float16   # or torch.float32
+
+# Local model path
+model_path = "/path/to/Meta-Llama-3.1-8B-Instruct"
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+
+# Load model
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    device_map="auto",
+    torch_dtype=desired_dtype,
 )
 
-model_int8 = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    quantization_config=bnb_config,
-    device_map="cuda"
-)
+model.eval()
 
-print("Generating with int8 quantized model...")
-torch.cuda.synchronize()
-start_int8 = time.time()
+# Input prompt
+prompt = "Explain black holes simply."
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-output_int8 = model_int8.generate(**inputs, max_new_tokens=100)
+# Warm up once (optional, helps with first-time slow startup)
+with torch.no_grad():
+    _ = model.generate(**inputs, max_new_tokens=10)
 
-torch.cuda.synchronize()
-end_int8 = time.time()
+# Start timing
+start_time = time.time()
 
-print(f"\nINT8 Quantized Output:\n{tokenizer.decode(output_int8[0], skip_special_tokens=True)}")
-print(f"INT8 Generation Time: {end_int8 - start_int8:.2f} seconds")
+# Real inference
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=200,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True
+    )
 
+end_time = time.time()
+
+# Decode output
+response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(response)
+
+# Print time taken
+print(f"\nTime taken: {end_time - start_time:.2f} seconds")
