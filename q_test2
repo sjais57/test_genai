@@ -170,3 +170,44 @@ def generate_tokens(prompt, max_tokens=MAX_NEW_TOKENS):
 # === RUN GENERATION ===
 output = generate_tokens(PROMPT)
 print("\nGenerated text:\n", output)
+
+
++++++
+
+from auto_gptq import AutoGPTQForCausalLM
+from transformers import AutoTokenizer
+
+# Path to your quantized model
+model_name_or_path = "/path/to/your/quantized-llama3-8b-gptq"
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+
+# Load quantized model
+model = AutoGPTQForCausalLM.from_quantized(
+    model_name_or_path,
+    device="cuda:0",                # or "cuda" if you have 1 GPU
+    torch_dtype="auto",             # Will correctly use float16
+    use_triton=False,               # Set True if you quantized with Triton
+    inject_fused_attention=True,    # Speeds up attention
+)
+
+# Your input prompt
+prompt = "Explain the theory of relativity in simple words."
+
+# Tokenize prompt
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+# Generate output
+output_tokens = model.generate(
+    **inputs,
+    max_new_tokens=200,       # How many tokens to generate
+    do_sample=True,           # Enable sampling for more creative output
+    temperature=0.7,          # Sampling temperature
+    top_p=0.9,                # Nucleus sampling
+)
+
+# Decode and print the generated text
+generated_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
+print(generated_text)
+
