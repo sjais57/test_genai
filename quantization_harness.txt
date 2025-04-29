@@ -131,3 +131,63 @@ print(response)
 
 # Print time taken
 print(f"\nTime taken: {end_time - start_time:.2f} seconds")
+
+
+
+==========================================================================
+Quantized model: Code: Load LLaMA-3-8B-Instruct with 4-bit Quantization (AutoGPTQ)
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import torch
+
+model_name = "TheBloke/Meta-Llama-3-8B-Instruct-GPTQ"  # 4-bit quantized model
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+# Load quantized model (uses AutoGPTQ under the hood)
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    device_map="auto",       # Automatically maps to GPU
+    torch_dtype=torch.float16,  # Can also use float32 if memory allows
+    trust_remote_code=True
+)
+
+# Set up text generation pipeline
+pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+
+# Example prompt
+prompt = "Explain the concept of transfer learning in simple terms."
+
+# Generate response
+output = pipe(prompt, max_new_tokens=150, do_sample=True, temperature=0.7)
+print(output[0]["generated_text"])
+
+
+============================================================
+Full precision model: Alternative: Use bitsandbytes for 8-bit or 4-bit (FP4/INT8) inference
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,  # or load_in_8bit=True
+    bnb_4bit_quant_type="nf4",  # Normal Float 4, good trade-off
+    bnb_4bit_use_double_quant=True,
+    llm_int8_threshold=6.0,
+)
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    quantization_config=bnb_config,
+    device_map="auto",
+    trust_remote_code=True,
+    torch_dtype=torch.float16
+)
+
+inputs = tokenizer("Explain quantum computing in simple terms:", return_tensors="pt").to("cuda")
+outputs = model.generate(**inputs, max_new_tokens=100)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+
