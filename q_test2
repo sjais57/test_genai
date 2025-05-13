@@ -211,3 +211,56 @@ output_tokens = model.generate(
 generated_text = tokenizer.decode(output_tokens[0], skip_special_tokens=True)
 print(generated_text)
 
+++++++++
+import paramiko
+import smtplib
+from email.message import EmailMessage
+
+# Configuration
+servers = [
+    "192.168.1.101",
+    "192.168.1.102",
+    # Add all 20 server IPs or hostnames
+]
+username = "monitor_user"
+password = "your_password"
+failed_servers = []
+
+def check_ssh(host, username, password):
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, username=username, password=password, timeout=5)
+        client.close()
+        return True
+    except paramiko.AuthenticationException:
+        return False
+    except Exception as e:
+        return False
+
+def send_alert_email(failed_hosts):
+    msg = EmailMessage()
+    msg['Subject'] = 'SSSD Login Failure Detected'
+    msg['From'] = 'monitor@yourdomain.com'
+    msg['To'] = 'admin@yourdomain.com'
+    body = "The following servers failed SSH login due to possible sssd issues:\n\n" + "\n".join(failed_hosts)
+    msg.set_content(body)
+
+    # Adjust SMTP config
+    with smtplib.SMTP('smtp.yourdomain.com', 587) as server:
+        server.starttls()
+        server.login('monitor@yourdomain.com', 'email_password')
+        server.send_message(msg)
+
+# Check all servers
+for server in servers:
+    print(f"Checking {server}...")
+    if not check_ssh(server, username, password):
+        failed_servers.append(server)
+
+# Send email if any failure
+if failed_servers:
+    send_alert_email(failed_servers)
+    print("Alert email sent.")
+else:
+    print("All servers OK.")
