@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# getentgroup: fetch group members from AD via ldapsearch
+
+GROUP="$1"
+if [ -z "$GROUP" ]; then
+  echo "Usage: getentgroup <groupname>"
+  exit 1
+fi
+
+# Customize these values for your AD
+LDAP_URI="ldap://your-ad-server"
+BASE_DN="dc=example,dc=com"
+BIND_DN="cn=readonlyuser,dc=example,dc=com"   # optional
+BIND_PW="your_password"                       # optional
+
+# If bind credentials are needed, use -D "$BIND_DN" -w "$BIND_PW"
+ldapsearch -LLL -x -H "$LDAP_URI" -D "$BIND_DN" -w "$BIND_PW" "(cn=$GROUP)" member | awk '/^member: / {print $2}'
+
+
+awk -F, '{for(i=1;i<=NF;i++){if($i ~ /^CN=/){sub(/^CN=/,"",$i); print $i}}}'
+
+
+ldapsearch ... | awk '/^member: / {print $2}' | awk -F, '{for(i=1;i<=NF;i++){if($i ~ /^CN=/){sub(/^CN=/,"",$i); print $i}}}'
