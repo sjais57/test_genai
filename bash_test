@@ -121,3 +121,28 @@ if [[ -n "$EMAIL" ]]; then
 else
     cat "$TMP_FILE"
 fi
++++++++++++
+
+ldapsearch -LLL -x -H "$LDAP_SERVER" -D "$BIND_DN" -w "$BIND_PWD" -b "$BASE_DN" "(cn=$GROUP_NAME)" member |
+grep "^member" |
+while read -r line; do
+    # Extract the portion between "CN=" and the second comma
+    full_entry=$(echo "$line" | sed -E 's/^member: CN=([^,]+,[^,]+),.*/\1/')
+    
+    # Remove backslashes (like LastName\, Firstname)
+    full_entry=$(echo "$full_entry" | sed 's/\\//g')
+
+    # Split into words
+    words=($full_entry)
+    num_words=${#words[@]}
+    
+    if [ "$num_words" -lt 2 ]; then
+        continue  # skip invalid line
+    fi
+
+    user_id="${words[-1]}"
+    first_name="${words[1]}"
+    last_name="${words[$((num_words-2))]}"
+
+    echo "$first_name,$last_name,$user_id" >> "$TMP_FILE"
+done
