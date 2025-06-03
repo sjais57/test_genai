@@ -218,3 +218,18 @@ fi
 
 # Cleanup
 rm -f "$TMP_FILE"
+=======================================
+
+echo 'member: CN=Sharma\, Arti Kumari Devi test123,OU=Dept,OU=People,DC=example,DC=com' | \
+sed -E 's/member: CN=([^,]+,[^,]+).*/\1/' | \
+sed 's/\\//g' | tr -d ',' | \
+awk '{
+  n=split($0, a, " ")
+  user_id = a[n]
+  first_name = a[2]
+  last_name = a[n-1]
+  middle = ""
+  for (i=3; i<=n-2; i++) middle = middle a[i] " "
+  gsub(/ $/, "", middle)
+  print first_name " " middle " " last_name "," user_id
+}'
