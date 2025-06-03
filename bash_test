@@ -60,3 +60,8 @@ fi
 
 # Cleanup
 rm -f "$TMP_FILE"
+
+======================
+
+awk -F'[=,] *' '{gsub(/\\/,"",$2); n=split($3,a," "); for(i=1;i<n;i++) printf("%s ",a[i]); printf("%s, %s\n",$2,a[n])}'
+
