@@ -1,154 +1,3 @@
-ldapsearch -LLL -x -H ldaps://xxx -D "CN=U,OU=test,OU=qwe,OU=user,OU=qas,DC=corp,DC=company,DC=com" -w $ -b "OU=BAND,DC=corp,DC=company,DC=com" "(cn=groupname)" member | grep -E 'givenName|sn|uid' | awk -F': ' '{print $2}' | paste - - - | awk '{print $2, $1, $3}'
-
-ldapsearch -LLL -x -H ldaps://xxx -D "CN=U,OU=test,OU=qwe,OU=user,OU=qas,DC=corp,DC=company,DC=com" -w $ -b "OU=BAND,DC=corp,DC=company,DC=com" "(cn=groupname)" member | grep "^member" | sed -E 's/^member: CN=([^\\]+)\\, ([^ ]+) ([^ ]+) .*/\2 \1 \3/'
-
-
-#!/bin/bash
-
-# -------------------------------
-# User Configuration
-# -------------------------------
-LDAP_SERVER="ldaps://xxx"
-BIND_DN="CN=U,OU=test,OU=qwe,OU=user,OU=qas,DC=corp,DC=company,DC=com"
-BASE_DN="OU=BAND,DC=corp,DC=company,DC=com"
-BIND_PWD="your_password_here"   # You may choose to read this securely
-TMP_FILE="output.csv"
-
-# -------------------------------
-# Help Function
-# -------------------------------
-usage() {
-    echo "Usage: $0 -g <group_name> [-e <email_address>]"
-    exit 1
-}
-
-# -------------------------------
-# Parse Arguments
-# -------------------------------
-while getopts "g:e:" opt; do
-  case $opt in
-    g) GROUP_NAME="$OPTARG" ;;
-    e) EMAIL="$OPTARG" ;;
-    *) usage ;;
-  esac
-done
-
-if [[ -z "$GROUP_NAME" ]]; then
-    usage
-fi
-
-# -------------------------------
-# LDAP Query and Parsing
-# -------------------------------
-echo "First Name,Last Name,User ID" > "$TMP_FILE"
-
-ldapsearch -LLL -x -H "$LDAP_SERVER" -D "$BIND_DN" -w "$BIND_PWD" -b "$BASE_DN" "(cn=$GROUP_NAME)" member |
-grep "^member" |
-while read -r line; do
-    CN=$(echo "$line" | sed -E 's/^member: CN=([^\\]+)\\, ([^ ]+) ([^ ,]+).*/\2,\1,\3/')
-    echo "$CN" >> "$TMP_FILE"
-done
-
-# -------------------------------
-# Output or Email
-# -------------------------------
-if [[ -n "$EMAIL" ]]; then
-    mail -s "LDAP Group Info: $GROUP_NAME" "$EMAIL" < "$TMP_FILE"
-    echo "CSV report sent to $EMAIL"
-else
-    cat "$TMP_FILE"
-fi
-
-
-
-======================
-
-#!/bin/bash
-
-# -------------------------------
-# User Configuration
-# -------------------------------
-LDAP_SERVER="ldaps://xxx"
-BIND_DN="CN=U,OU=test,OU=qwe,OU=user,OU=qas,DC=corp,DC=company,DC=com"
-BASE_DN="OU=BAND,DC=corp,DC=company,DC=com"
-BIND_PWD="your_password_here"   # Replace or prompt securely
-TMP_FILE="/tmp/ldapgroup_output.csv"
-
-# -------------------------------
-# Usage Function
-# -------------------------------
-usage() {
-    echo "Usage: $0 <groupname> [-e <email_address>]"
-    exit 1
-}
-
-# -------------------------------
-# Argument Parsing
-# -------------------------------
-if [[ $# -lt 1 ]]; then
-    usage
-fi
-
-GROUP_NAME="$1"
-shift
-
-while getopts ":e:" opt; do
-  case $opt in
-    e) EMAIL="$OPTARG" ;;
-    *) usage ;;
-  esac
-done
-
-# -------------------------------
-# LDAP Query and CSV Generation
-# -------------------------------
-echo "First Name,Last Name,User ID" > "$TMP_FILE"
-
-ldapsearch -LLL -x -H "$LDAP_SERVER" -D "$BIND_DN" -w "$BIND_PWD" -b "$BASE_DN" "(cn=$GROUP_NAME)" member |
-grep "^member" |
-while read -r line; do
-    # Extract CN fields like: CN=Last_Name\, First_name user_id,...
-    CN=$(echo "$line" | sed -E 's/^member: CN=([^\\]+)\\, ([^ ]+) ([^ ,]+).*/\2,\1,\3/')
-    echo "$CN" >> "$TMP_FILE"
-done
-
-# -------------------------------
-# Output or Email
-# -------------------------------
-if [[ -n "$EMAIL" ]]; then
-    mail -s "LDAP Group Info: $GROUP_NAME" "$EMAIL" < "$TMP_FILE"
-    echo "CSV report sent to $EMAIL"
-else
-    cat "$TMP_FILE"
-fi
-+++++++++++
-
-ldapsearch -LLL -x -H "$LDAP_SERVER" -D "$BIND_DN" -w "$BIND_PWD" -b "$BASE_DN" "(cn=$GROUP_NAME)" member |
-grep "^member" |
-while read -r line; do
-    # Extract the portion between "CN=" and the second comma
-    full_entry=$(echo "$line" | sed -E 's/^member: CN=([^,]+,[^,]+),.*/\1/')
-    
-    # Remove backslashes (like LastName\, Firstname)
-    full_entry=$(echo "$full_entry" | sed 's/\\//g')
-
-    # Split into words
-    words=($full_entry)
-    num_words=${#words[@]}
-    
-    if [ "$num_words" -lt 2 ]; then
-        continue  # skip invalid line
-    fi
-
-    user_id="${words[-1]}"
-    first_name="${words[1]}"
-    last_name="${words[$((num_words-2))]}"
-
-    echo "$first_name,$last_name,$user_id" >> "$TMP_FILE"
-done
-====================
-
-
 #!/bin/bash
 
 # Usage: ldapgroup groupname [-e email@example.com]
@@ -177,38 +26,31 @@ TMP_FILE="/tmp/ldapgroup_output_$$.csv"
 ldapsearch -LLL -x -H "$LDAP_SERVER" -D "$BIND_DN" -w "$BIND_PWD" -b "$BASE_DN" "(cn=$GROUP_NAME)" member |
 grep "^member" |
 while read -r line; do
-    # Extract portion between CN= and the second comma
-    full_entry=$(echo "$line" | sed -E 's/^member: CN=([^,]+,[^,]+),.*/\1/')
+    # Extract the full member entry
+    full_entry=$(echo "$line" | sed 's/^member: //')
 
-    # Clean up: remove \\, and any commas from names
-    clean_entry=$(echo "$full_entry" | sed 's/\\//g' | tr -d ',')
+    # Process names in format "CN=Sharma\, Arti Kumari Devi test123"
+    # 1. Extract last name (before backslash)
+    last_name=$(echo "$full_entry" | awk -F'CN=' '{print $2}' | awk -F'\\\\,' '{print $1}')
+    
+    # 2. Extract everything between comma and last space (first + middle names)
+    first_part=$(echo "$full_entry" | sed -n 's/.*\\, \(.*\) [^ ]*$/\1/p')
+    
+    # 3. Extract user ID (last word)
+    user_id=$(echo "$full_entry" | awk '{print $NF}')
 
-    # Split the cleaned line into words
-    IFS=' ' read -r -a parts <<< "$clean_entry"
-    word_count=${#parts[@]}
-
-    if (( word_count < 3 )); then
-        continue  # must have at least First Last UserID
+    # Combine first+middle names with last name
+    if [ -n "$first_part" ] && [ -n "$last_name" ]; then
+        formatted_name="$first_part $last_name, $user_id"
+        echo "$formatted_name" >> "$TMP_FILE"
     fi
-
-    user_id="${parts[$((word_count - 1))]}"
-    first_name="${parts[1]}"
-    last_name="${parts[$((word_count - 2))]}"
-
-    # Get middle names if any
-    if (( word_count > 3 )); then
-        middle_parts=("${parts[@]:2:$((word_count - 4))}")
-        middle_name=$(IFS=' '; echo "${middle_parts[*]}")
-        full_name="$first_name $middle_name $last_name"
-    else
-        full_name="$first_name $last_name"
-    fi
-
-    echo "$full_name,$user_id" >> "$TMP_FILE"
 done
 
+# Sort the output alphabetically
+sort -o "$TMP_FILE" "$TMP_FILE"
+
 # Output to terminal
-cat "$TMP_FILE"
+column -t -s ',' "$TMP_FILE" | awk '{printf "%-40s %s\n", $0, ""}'  # Format as columns
 
 # Email if requested
 if [ -n "$EMAIL" ]; then
@@ -218,18 +60,3 @@ fi
 
 # Cleanup
 rm -f "$TMP_FILE"
-=======================================
-
-echo 'member: CN=Sharma\, Arti Kumari Devi test123,OU=Dept,OU=People,DC=example,DC=com' | \
-sed -E 's/member: CN=([^,]+,[^,]+).*/\1/' | \
-sed 's/\\//g' | tr -d ',' | \
-awk '{
-  n=split($0, a, " ")
-  user_id = a[n]
-  first_name = a[2]
-  last_name = a[n-1]
-  middle = ""
-  for (i=3; i<=n-2; i++) middle = middle a[i] " "
-  gsub(/ $/, "", middle)
-  print first_name " " middle " " last_name "," user_id
-}'
