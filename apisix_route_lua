@@ -1,0 +1,53 @@
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -H "X-API-KEY: <your-api-key>" -d '
+{
+  "uri": "/secure-api",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function()
+          local cjson = require(\"cjson.safe\")
+          local auth = ngx.req.get_headers()[\"Authorization\"]
+          if not auth then
+            ngx.status = 401
+            ngx.say(\"Missing Authorization\")
+            return
+          end
+          local _, _, token = string.find(auth, \"Bearer%s+(.+)\")
+          local function split(str, sep)
+            local result = {}
+            for m in (str .. sep):gmatch(\"(.-)\" .. sep) do
+              table.insert(result, m)
+            end
+            return result
+          end
+          local function base64url_decode(input)
+            input = input:gsub(\"-\", \"+\"):gsub(\"_\", \"/\")
+            local pad = 4 - (#input % 4)
+            if pad < 4 then input = input .. string.rep(\"=\", pad) end
+            return ngx.decode_base64(input)
+          end
+          local parts = split(token, \".\")
+          if #parts ~= 3 then
+            ngx.status = 401
+            ngx.say(\"Invalid JWT format\")
+            return
+          end
+          local payload_b64 = parts[2]
+          local payload_json = base64url_decode(payload_b64)
+          local payload = cjson.decode(payload_json)
+          if payload and payload.email then
+            ngx.req.set_header(\"X-Email\", payload.email)
+          end
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "127.0.0.1:9001": 1
+    }
+  }
+}'
