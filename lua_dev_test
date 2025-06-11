@@ -1,0 +1,49 @@
+Option 2: Using Lua Code Inline (Simpler, for Dev/Test)
+If you don’t want a full plugin, but still want to separate code logically, 
+  you can define a Lua module in /usr/local/apisix/lua/my_token_utils.lua:
+
+-- my_token_utils.lua
+local M = {}
+
+function M.get_token()
+    local http = require("resty.http")
+    local cjson = require("cjson.safe")
+    local httpc = http.new()
+
+    local res, err = httpc:request_uri("https://auth.example.com/oauth/token", {
+        method = "POST",
+        body = "grant_type=client_credentials&client_id=your-client-id&client_secret=your-client-secret",
+        headers = {
+            ["Content-Type"] = "application/x-www-form-urlencoded"
+        },
+        ssl_verify = false
+    })
+
+    if not res or res.status ~= 200 then
+        return nil
+    end
+
+    local data = cjson.decode(res.body)
+    return data and data.access_token or nil
+end
+
+return M
+
+
+  Then in the serverless-pre-function plugin inline script:
+
+  return function()
+  local token_utils = require("my_token_utils")
+  local token = token_utils.get_token()
+  if token then
+    ngx.req.set_header("Authorization", "Bearer " .. token)
+  else
+    ngx.status = 500
+    ngx.say("Unable to get upstream token")
+    return ngx.exit(500)
+  end
+end
+
+  Make sure the Lua module path is discoverable (via lua_package_path in APISIX config or placing it in /usr/local/apisix/lua/).
+
+  
