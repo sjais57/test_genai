@@ -1,0 +1,97 @@
+📁 Step 1: Write Lua Script (e.g., /home/rohan/lua/fetch_token.lua)
+
+-- /home/rohan/lua/fetch_token.lua
+
+local http = require("resty.http")
+local cjson = require("cjson.safe")
+
+return function()
+    local client_id = "your_client_id"
+    local client_secret = "your_client_secret"
+    local token_url = "https://auth.example.com/oauth/token"
+
+    local httpc = http.new()
+    local res, err = httpc:request_uri(token_url, {
+        method = "POST",
+        body = "grant_type=client_credentials&client_id=" .. client_id .. "&client_secret=" .. client_secret,
+        headers = {
+            ["Content-Type"] = "application/x-www-form-urlencoded"
+        },
+        ssl_verify = false  -- set true if using valid cert
+    })
+
+    if not res then
+        ngx.log(ngx.ERR, "Token request failed: ", err)
+        ngx.status = 500
+        ngx.say("Token request failed: ", err)
+        return ngx.exit(500)
+    end
+
+    if res.status ~= 200 then
+        ngx.log(ngx.ERR, "Token fetch error. Status: ", res.status, " Body: ", res.body)
+        ngx.status = res.status
+        ngx.say("Failed to fetch token. Body: ", res.body)
+        return ngx.exit(res.status)
+    end
+
+    local body = cjson.decode(res.body)
+    if not body or not body.access_token then
+        ngx.log(ngx.ERR, "Token parse error. Response: ", res.body)
+        ngx.status = 500
+        ngx.say("Token parse error")
+        return ngx.exit(500)
+    end
+
+    ngx.req.set_header("Authorization", "Bearer " .. body.access_token)
+end
+
+
+Then create route:
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/secure-api \
+  -H "X-API-KEY: <your-admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "uri": "/secure-api",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": ["file:///home/rohan/lua/fetch_token.lua"]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream.example.com:443": 1
+    },
+    "uri": "/api/stream/job"
+  }
+}'
+
+
+Alternate:
+    curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/secure-api \
+  -H "X-API-KEY: <your-admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uri": "/secure-api",
+    "plugins": {
+      "jwt-auth": {},
+      "serverless-pre-function": {
+        "phase": "access",
+        "functions": [
+          "file:///opt/apisix/lua-scripts/fetch_token.lua"
+        ]
+      }
+    },
+    "upstream": {
+      "type": "roundrobin",
+      "scheme": "https",
+      "nodes": {
+        "upstream.example.com:443": 1
+      },
+      "uri": "/api/stream/job"
+    }
+  }'
+
