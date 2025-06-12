@@ -1,169 +1,272 @@
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -d '
 {
-  "uri": "/secure-api",
+  "uri": "/protected/*",
+  "name": "dynamic-upstream-auth-route",
+  "methods": ["GET", "POST", "PUT", "DELETE"],
   "plugins": {
-    "jwt-auth": {},
-    "serverless-pre-function": {
-      "phase": "access",
-      "functions": [
-        "return function()
-          local http = require(\"resty.http\")
-          local cjson = require(\"cjson.safe\")
-          local token_cache_key = \"upstream_token\"
-          local token_expiry_key = \"upstream_token_expiry\"
-          local token = ngx.shared.my_cache:get(token_cache_key)
-          local expiry = ngx.shared.my_cache:get(token_expiry_key)
-          local current_time = ngx.now()
-
-          if not token or not expiry or current_time >= expiry then
-            local client_id = \"your_client_id\"
-            local client_secret = \"your_client_secret\"
-            local token_url = \"https://auth.example.com/oauth/token\"
-
-            local httpc = http.new()
-            local res, err = httpc:request_uri(token_url, {
-              method = \"POST\",
-              body = \"grant_type=client_credentials&client_id=\" .. client_id .. \"&client_secret=\" .. client_secret,
-              headers = {
-                [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
-              },
-              ssl_verify = false
-            })
-
-            if not res or res.status ~= 200 then
-              ngx.status = 500
-              ngx.say(\"Failed to fetch upstream token: \", err or res.status)
-              return
-            end
-
-            local body = cjson.decode(res.body)
-            token = body.access_token
-            local expires_in = body.expires_in or 900
-            ngx.shared.my_cache:set(token_cache_key, token, expires_in - 60)
-            ngx.shared.my_cache:set(token_expiry_key, current_time + expires_in - 60, expires_in)
-          end
-
-          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
-        end"
-      ]
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "upstream.example.com:443": 1
+    "jwt-auth": {
+      "key": "user-key",
+      "secret": "your-jwt-secret-here",
+      "algorithm": "HS256"
     },
-    "scheme": "https"
-  }
-}'
-
-
-
-
-=================
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -d '
-{
-  "uri": "/secure-api",
-  "plugins": {
     "serverless-pre-function": {
-      "phase": "access",
+      "phase": "rewrite",
       "functions": [
-        "return function()
-          local http = require(\"resty.http\")
-          local cjson = require(\"cjson.safe\")
-          local token_cache_key = \"upstream_token\"
-          local expiry_cache_key = \"upstream_token_expiry\"
-          local token = ngx.shared.my_cache:get(token_cache_key)
-          local expiry = ngx.shared.my_cache:get(expiry_cache_key)
-          local now = ngx.now()
-
-          if not token or not expiry or now >= expiry then
-            local httpc = http.new()
-            local res, err = httpc:request_uri(\"http://127.0.0.1:9000/oauth/token\", {
-              method = \"POST\",
-              body = \"grant_type=client_credentials&client_id=my-client-id&client_secret=my-client-secret\",
-              headers = {
-                [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
-              }
-            })
-
-            if not res or res.status ~= 200 then
-              ngx.status = 500
-              ngx.say(\"Token fetch error: \", err or res.status)
-              return
-            end
-
-            local data = cjson.decode(res.body)
-            token = data.access_token
-            local expires_in = data.expires_in or 900
-
-            ngx.shared.my_cache:set(token_cache_key, token, expires_in - 60)
-            ngx.shared.my_cache:set(expiry_cache_key, now + expires_in - 60, expires_in)
-          end
-
-          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
-        end"
-      ]
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "127.0.0.1:9001": 1
-    }
-  }
-}'
-
-
-=================
-
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/secure-api \
-  -H "X-API-KEY: <your-admin-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-  "uri": "/secure-api",
-  "plugins": {
-    "jwt-auth": {},
-    "serverless-pre-function": {
-      "phase": "access",
-      "functions": [
-        "return function()
-          local http = require(\"resty.http\")
-          local cjson = require(\"cjson.safe\")
-
-          local client_id = \"your_client_id\"
-          local client_secret = \"your_client_secret\"
-          local token_url = \"https://auth.example.com/oauth/token\"
-
+        "return function(conf, ctx)
+          -- Import required modules
+          local core = require('apisix.core')
+          local http = require('resty.http')
+          
+          -- Your client credentials
+          local client_id = 'your_client_id'
+          local client_secret = 'your_client_secret'
+          
+          -- Generate timestamp or nonce for uniqueness if needed
+          local timestamp = tostring(ngx.now())
+          
+          -- Create your bearer token (customize this logic as needed)
+          -- This could be a JWT, base64 encoded credentials, or any format your upstream expects
+          local bearer_token = core.base64.encode(client_id .. ':' .. client_secret .. ':' .. timestamp)
+          
+          -- Alternative: If you need to fetch a token from an auth service
+          --[[
           local httpc = http.new()
-          local res, err = httpc:request_uri(token_url, {
-              method = \"POST\",
-              body = \"grant_type=client_credentials&client_id=\" .. client_id .. \"&client_secret=\" .. client_secret,
-              headers = {
-                  [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
-              },
-              ssl_verify = false
+          local res, err = httpc:request_uri('https://auth-service/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials&client_id='..client_id..'&client_secret='..client_secret,
+            headers = {
+              ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
           })
-
-          if not res or res.status ~= 200 then
-              ngx.status = 500
-              ngx.say(\"Failed to fetch token: \", err or res.status)
-              return
+          if not res then
+            core.log.error('failed to fetch token: ', err)
+            return 500, { message = 'Failed to obtain upstream token' }
           end
-
-          local body = cjson.decode(res.body)
-          local token = body.access_token
-          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
+          local data = core.json.decode(res.body)
+          bearer_token = data.access_token
+          --]]
+          
+          -- Set the Authorization header for upstream
+          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
         end"
       ]
     }
   },
   "upstream": {
     "type": "roundrobin",
-    "scheme": "https",
     "nodes": {
-      "upstream.example.com:443": 1
+      "your-upstream-service:8080": 1
+    }
+  }
+}
+
+
+
+=======================
+1. Basic Route Configuration
+
+{
+  "uri": "/api/*",
+  "plugins": {
+    "jwt-auth": {
+      "key": "user-key",
+      "secret": "your-jwt-secret"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          -- Required modules
+          local core = require('apisix.core')
+          local http = require('resty.http')
+          
+          -- Client credentials (consider using secrets manager)
+          local CLIENT_ID = 'your_client_id'
+          local CLIENT_SECRET = 'your_client_secret'
+          
+          -- 1. Simple Token Generation Option
+          local timestamp = ngx.now() * 1000 -- current time in milliseconds
+          local bearer_token = core.base64.encode(CLIENT_ID .. ':' .. CLIENT_SECRET .. ':' .. timestamp)
+          
+          -- 2. OAuth Token Fetch Option (uncomment if needed)
+          --[[
+          local httpc = http.new()
+          local res, err = httpc:request_uri('https://auth-server.com/oauth/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials' ..
+                   '&client_id=' .. CLIENT_ID ..
+                   '&client_secret=' .. CLIENT_SECRET,
+            headers = {
+              ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
+          })
+          
+          if not res then
+            core.log.error('Token fetch failed: ', err)
+            return ngx.exit(500)
+          end
+          
+          local token_data = core.json.decode(res.body)
+          bearer_token = token_data.access_token
+          --]]
+          
+          -- Set the Authorization header
+          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "nodes": {
+      "your-upstream-service:8080": 1
+    }
+  }
+}
+
+==================
+2. Advanced Version with Caching
+{
+  "plugins": {
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          local core = require('apisix.core')
+          local http = require('resty.http')
+          
+          -- Shared memory zone for caching (must be defined in nginx.conf)
+          local token_cache = ngx.shared.token_cache
+          local cache_key = 'client_token'
+          
+          -- Check cache first
+          local cached_token = token_cache:get(cache_key)
+          if cached_token then
+            core.request.set_header(ctx, 'Authorization', 'Bearer ' .. cached_token)
+            return
+          end
+          
+          -- Fetch new token
+          local httpc = http.new()
+          local res, err = httpc:request_uri('https://auth-server.com/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials' ..
+                   '&client_id=your_client_id' ..
+                   '&client_secret=your_client_secret',
+            headers = {
+              ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
+          })
+          
+          if not res then
+            core.log.error('Token fetch failed: ', err)
+            return ngx.exit(500)
+          end
+          
+          local token_data = core.json.decode(res.body)
+          local new_token = token_data.access_token
+          
+          -- Cache with 5 minute expiration
+          token_cache:set(cache_key, new_token, 300)
+          
+          -- Set header
+          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. new_token)
+        end"
+      ]
+    }
+  }
+}
+
+
+Implementation Steps
+Create the Route:
+
+curl http://127.0.0.1:9180/apisix/admin/routes/1 \
+-H 'X-API-KEY: your-admin-key' -X PUT -d '
+{
+  "uri": "/secure/*",
+  "plugins": {
+    "jwt-auth": { /* your config */ },
+    "serverless-pre-function": { /* above config */ }
+  },
+  "upstream": { /* your config */ }
+}'
+
+
+====================
+Another way:
+curl http://127.0.0.1:9180/apisix/admin/routes/1 \
+-H 'X-API-KEY: your-admin-key' \
+-X PUT -d '
+{
+  "uri": "/proxy-api/*",
+  "name": "httpbin-with-dynamic-auth",
+  "plugins": {
+    "jwt-auth": {
+      "key": "api-user",
+      "secret": "your-secret-here",
+      "algorithm": "HS256"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          local core = require(\"apisix.core\")
+          local http = require(\"resty.http\")
+          
+          -- 1. Check cache first
+          local cached_token = ngx.shared.token_cache:get(\"httpbin_token\")
+          if cached_token then
+            core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. cached_token)
+            core.log.warn(\"Using cached token\")
+            return
+          end
+          
+          -- 2. Fetch new token if cache is empty
+          local httpc = http.new()
+          local res, err = httpc:request_uri(\"https://your-auth-service.com/token\", {
+            method = \"POST\",
+            body = \"grant_type=client_credentials\" ..
+                   \"&client_id=YOUR_CLIENT_ID\" ..
+                   \"&client_secret=YOUR_CLIENT_SECRET\",
+            headers = {
+              [\"Content-Type\"] = \"application/x-www-form-urlencoded\",
+              [\"Accept\"] = \"application/json\"
+            },
+            ssl_verify = false -- For testing only, remove in production
+          })
+          
+          if not res then
+            core.log.error(\"Token fetch failed: \", err)
+            return ngx.exit(502)
+          end
+          
+          -- 3. Parse response and cache the token
+          local token_data = core.json.decode(res.body)
+          if not token_data.access_token then
+            core.log.error(\"Invalid token response: \", res.body)
+            return ngx.exit(502)
+          end
+          
+          ngx.shared.token_cache:set(\"httpbin_token\", token_data.access_token, token_data.expires_in or 300)
+          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. token_data.access_token)
+          core.log.warn(\"Generated new token\")
+        end"
+      ]
+    },
+    "proxy-rewrite": {
+      "uri": "/api/jo",
+      "host": "httpbin.org"
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org:80": 1
+    },
+    "scheme": "http",
+    "timeout": {
+      "connect": 5,
+      "send": 10,
+      "read": 10
     }
   }
 }'
-
