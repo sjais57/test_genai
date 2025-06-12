@@ -1,0 +1,60 @@
+{
+  "uri": "/protected/*",
+  "name": "dynamic-upstream-auth-route",
+  "methods": ["GET", "POST", "PUT", "DELETE"],
+  "plugins": {
+    "jwt-auth": {
+      "key": "user-key",
+      "secret": "your-jwt-secret-here",
+      "algorithm": "HS256"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          -- Import required modules
+          local core = require('apisix.core')
+          local http = require('resty.http')
+          
+          -- Your client credentials
+          local client_id = 'your_client_id'
+          local client_secret = 'your_client_secret'
+          
+          -- Generate timestamp or nonce for uniqueness if needed
+          local timestamp = tostring(ngx.now())
+          
+          -- Create your bearer token (customize this logic as needed)
+          -- This could be a JWT, base64 encoded credentials, or any format your upstream expects
+          local bearer_token = core.base64.encode(client_id .. ':' .. client_secret .. ':' .. timestamp)
+          
+          -- Alternative: If you need to fetch a token from an auth service
+          --[[
+          local httpc = http.new()
+          local res, err = httpc:request_uri('https://auth-service/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials&client_id='..client_id..'&client_secret='..client_secret,
+            headers = {
+              ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
+          })
+          if not res then
+            core.log.error('failed to fetch token: ', err)
+            return 500, { message = 'Failed to obtain upstream token' }
+          end
+          local data = core.json.decode(res.body)
+          bearer_token = data.access_token
+          --]]
+          
+          -- Set the Authorization header for upstream
+          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "your-upstream-service:8080": 1
+    }
+  }
+}
