@@ -64,63 +64,48 @@
 =======================
 1. Basic Route Configuration
 
-{
-  "uri": "/api/*",
-  "plugins": {
-    "jwt-auth": {
-      "key": "user-key",
-      "secret": "your-jwt-secret"
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 \
+  -H "Content-Type: application/json" \
+  -H "X-API-KEY: <your-admin-key>" \
+  -d '{
+    "uri": "/api/*",
+    "plugins": {
+      "jwt-auth": {
+        "key": "user-key",
+        "secret": "your-jwt-secret"
+      },
+      "serverless-pre-function": {
+        "phase": "rewrite",
+        "functions": [
+          "return function(conf, ctx) \
+            local core = require(\"apisix.core\") \
+            local http = require(\"resty.http\") \
+            local CLIENT_ID = \"your_client_id\" \
+            local CLIENT_SECRET = \"your_client_secret\" \
+            local timestamp = ngx.now() * 1000 \
+            local bearer_token = core.base64.encode(CLIENT_ID .. \":\" .. CLIENT_SECRET .. \":\" .. timestamp) \
+            -- If using OAuth token fetch, uncomment and adjust below \
+            -- local httpc = http.new() \
+            -- local res, err = httpc:request_uri(\"https://auth-server.com/oauth/token\", { \
+            --   method = \"POST\", \
+            --   body = \"grant_type=client_credentials&client_id=\" .. CLIENT_ID .. \"&client_secret=\" .. CLIENT_SECRET, \
+            --   headers = { [\"Content-Type\"] = \"application/x-www-form-urlencoded\" } \
+            -- }) \
+            -- if not res then core.log.error(\"Token fetch failed: \", err) return ngx.exit(500) end \
+            -- local token_data = core.json.decode(res.body) \
+            -- bearer_token = token_data.access_token \
+            core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. bearer_token) \
+          end"
+        ]
+      }
     },
-    "serverless-pre-function": {
-      "phase": "rewrite",
-      "functions": [
-        "return function(conf, ctx)
-          -- Required modules
-          local core = require('apisix.core')
-          local http = require('resty.http')
-          
-          -- Client credentials (consider using secrets manager)
-          local CLIENT_ID = 'your_client_id'
-          local CLIENT_SECRET = 'your_client_secret'
-          
-          -- 1. Simple Token Generation Option
-          local timestamp = ngx.now() * 1000 -- current time in milliseconds
-          local bearer_token = core.base64.encode(CLIENT_ID .. ':' .. CLIENT_SECRET .. ':' .. timestamp)
-          
-          -- 2. OAuth Token Fetch Option (uncomment if needed)
-          --[[
-          local httpc = http.new()
-          local res, err = httpc:request_uri('https://auth-server.com/oauth/token', {
-            method = 'POST',
-            body = 'grant_type=client_credentials' ..
-                   '&client_id=' .. CLIENT_ID ..
-                   '&client_secret=' .. CLIENT_SECRET,
-            headers = {
-              ['Content-Type'] = 'application/x-www-form-urlencoded'
-            }
-          })
-          
-          if not res then
-            core.log.error('Token fetch failed: ', err)
-            return ngx.exit(500)
-          end
-          
-          local token_data = core.json.decode(res.body)
-          bearer_token = token_data.access_token
-          --]]
-          
-          -- Set the Authorization header
-          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
-        end"
-      ]
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "your-upstream-service:8080": 1
+      }
     }
-  },
-  "upstream": {
-    "nodes": {
-      "your-upstream-service:8080": 1
-    }
-  }
-}
+  }'
 
 ==================
 2. Advanced Version with Caching
