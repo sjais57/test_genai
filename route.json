@@ -1,16 +1,65 @@
-Test this:
-
 {
-  "uri": "/secure-api/*",
-  "name": "jwt-with-dynamic-upstream-auth",
-  "methods": ["GET", "POST", "PUT", "DELETE"],
+  "uri": "/api/*",
   "plugins": {
     "jwt-auth": {
-      "key": "api-user",
-      "secret": "your-jwt-secret-here",
-      "algorithm": "HS256",
-      "exp": 86400
+      "key": "user-key",
+      "secret": "your-jwt-secret"
     },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          -- Required modules
+          local core = require('apisix.core')
+          local http = require('resty.http')
+          
+          -- Client credentials (consider using secrets manager)
+          local CLIENT_ID = 'your_client_id'
+          local CLIENT_SECRET = 'your_client_secret'
+          
+          -- 1. Simple Token Generation Option
+          local timestamp = ngx.now() * 1000 -- current time in milliseconds
+          local bearer_token = core.base64.encode(CLIENT_ID .. ':' .. CLIENT_SECRET .. ':' .. timestamp)
+          
+          -- 2. OAuth Token Fetch Option (uncomment if needed)
+          --[[
+          local httpc = http.new()
+          local res, err = httpc:request_uri('https://auth-server.com/oauth/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials' ..
+                   '&client_id=' .. CLIENT_ID ..
+                   '&client_secret=' .. CLIENT_SECRET,
+            headers = {
+              ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
+          })
+          
+          if not res then
+            core.log.error('Token fetch failed: ', err)
+            return ngx.exit(500)
+          end
+          
+          local token_data = core.json.decode(res.body)
+          bearer_token = token_data.access_token
+          --]]
+          
+          -- Set the Authorization header
+          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "nodes": {
+      "your-upstream-service:8080": 1
+    }
+  }
+}
+
+2. Advanced Version with Caching
+
+{
+  "plugins": {
     "serverless-pre-function": {
       "phase": "rewrite",
       "functions": [
@@ -18,7 +67,7 @@ Test this:
           local core = require('apisix.core')
           local http = require('resty.http')
           
-          -- Shared memory zone for caching (defined in nginx.conf)
+          -- Shared memory zone for caching (must be defined in nginx.conf)
           local token_cache = ngx.shared.token_cache
           local cache_key = 'client_token'
           
@@ -56,161 +105,6 @@ Test this:
           core.request.set_header(ctx, 'Authorization', 'Bearer ' .. new_token)
         end"
       ]
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "your-upstream-service:8080": 1
-    },
-    "timeout": {
-      "connect": 5,
-      "send": 10,
-      "read": 10
-    }
-  }
-}
-
-
-
-
-
-{
-  "uri": "/protected/*",
-  "name": "dynamic-upstream-auth-route",
-  "methods": ["GET", "POST", "PUT", "DELETE"],
-  "plugins": {
-    "jwt-auth": {
-      "key": "user-key",
-      "secret": "your-jwt-secret-here",
-      "algorithm": "HS256"
-    },
-    "serverless-pre-function": {
-      "phase": "rewrite",
-      "functions": [
-        "return function(conf, ctx)
-          -- Import required modules
-          local core = require('apisix.core')
-          local http = require('resty.http')
-          
-          -- Your client credentials
-          local client_id = 'your_client_id'
-          local client_secret = 'your_client_secret'
-          
-          -- Generate timestamp or nonce for uniqueness if needed
-          local timestamp = tostring(ngx.now())
-          
-          -- Create your bearer token (customize this logic as needed)
-          -- This could be a JWT, base64 encoded credentials, or any format your upstream expects
-          local bearer_token = core.base64.encode(client_id .. ':' .. client_secret .. ':' .. timestamp)
-          
-          -- Alternative: If you need to fetch a token from an auth service
-          --[[
-          local httpc = http.new()
-          local res, err = httpc:request_uri('https://auth-service/token', {
-            method = 'POST',
-            body = 'grant_type=client_credentials&client_id='..client_id..'&client_secret='..client_secret,
-            headers = {
-              ['Content-Type'] = 'application/x-www-form-urlencoded'
-            }
-          })
-          if not res then
-            core.log.error('failed to fetch token: ', err)
-            return 500, { message = 'Failed to obtain upstream token' }
-          end
-          local data = core.json.decode(res.body)
-          bearer_token = data.access_token
-          --]]
-          
-          -- Set the Authorization header for upstream
-          core.request.set_header(ctx, 'Authorization', 'Bearer ' .. bearer_token)
-        end"
-      ]
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "your-upstream-service:8080": 1
-    }
-  }
-}
-
-Create a file apisix/plugins/dynamic-bearer-auth.lua:
-
-local core = require('apisix.core')
-local plugin_name = 'dynamic-bearer-auth'
-
-local schema = {
-  type = 'object',
-  properties = {
-    client_id = { type = 'string' },
-    client_secret = { type = 'string' },
-    token_endpoint = { type = 'string', default = '' }
-  },
-  required = {'client_id', 'client_secret'}
-}
-
-local _M = {
-  version = 1.0,
-  priority = 1000,
-  name = plugin_name,
-  schema = schema,
-}
-
-function _M.rewrite(conf, ctx)
-  local http = require('resty.http')
-  
-  -- Generate or fetch token based on configuration
-  local token
-  if conf.token_endpoint ~= '' then
-    -- Fetch token from OAuth server
-    local httpc = http.new()
-    local res, err = httpc:request_uri(conf.token_endpoint, {
-      method = 'POST',
-      body = 'grant_type=client_credentials' ..
-             '&client_id=' .. conf.client_id ..
-             '&client_secret=' .. conf.client_secret,
-      headers = {
-        ['Content-Type'] = 'application/x-www-form-urlencoded'
-      }
-    })
-    
-    if not res then
-      core.log.error('failed to fetch token: ', err)
-      return 500, { message = 'Failed to obtain upstream token' }
-    end
-    
-    local data = core.json.decode(res.body)
-    token = data.access_token
-  else
-    -- Generate simple token locally
-    token = core.base64.encode(conf.client_id .. ':' .. conf.client_secret .. ':' .. tostring(ngx.now()))
-  end
-  
-  -- Set Authorization header
-  core.request.set_header(ctx, 'Authorization', 'Bearer ' .. token)
-end
-
-return _M
-
-Then configure your route:
-{
-  "uri": "/protected/*",
-  "plugins": {
-    "jwt-auth": {
-      "key": "user-key",
-      "secret": "your-jwt-secret-here"
-    },
-    "dynamic-bearer-auth": {
-      "client_id": "your_client_id",
-      "client_secret": "your_client_secret",
-      "token_endpoint": "https://auth-service/oauth/token"
-    }
-  },
-  "upstream": {
-    "nodes": {
-      "your-upstream-service:8080": 1
     }
   }
 }
