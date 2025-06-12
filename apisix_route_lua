@@ -1,90 +1,115 @@
-# Create a test route with in-memory caching (no shared dict needed)
-curl http://127.0.0.1:9180/apisix/admin/routes/1 \
--H 'X-API-KEY: your-admin-key' \
--X PUT -d '
-{
-  "uri": "/test/*",
-  "plugins": {
-    "jwt-auth": {
-      "key": "test-key",
-      "secret": "test-secret"
+return function(conf, ctx)
+  local core = require("apisix.core")
+  local CLIENT_ID = "your_client_id"
+  local CLIENT_SECRET = "your_client_secret"
+  local timestamp = ngx.now() * 1000
+  local bearer_token = core.base64.encode(CLIENT_ID .. ":" .. CLIENT_SECRET .. ":" .. timestamp)
+  core.request.set_header(ctx, "Authorization", "Bearer " .. bearer_token)
+end
+
+
+The create route:
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 \
+  -H "X-API-KEY: <your-admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uri": "/api/*",
+    "plugins": {
+      "jwt-auth": {},
+      "serverless-pre-function": {
+        "phase": "rewrite",
+        "functions": ["file:///opt/apisix/lua/fetch_token.lua"]
+      }
     },
-    "serverless-pre-function": {
-      "phase": "rewrite",
-      "functions": [
-        "return function(conf, ctx)
-          local core = require(\"apisix.core\")
-          local http = require(\"resty.http\")
-          
-          -- Request-level caching
-          if ngx.ctx.cached_token then
-            core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. ngx.ctx.cached_token)
-            return
-          end
-          
-          -- Mock token generation for testing
-          local mock_token = \"mock_\" .. tostring(math.random(10000,99999))
-          ngx.ctx.cached_token = mock_token
-          
-          -- For real implementation, replace with:
-          -- local httpc = http.new()
-          -- local res, err = httpc:request_uri(\"https://auth-server.com/token\", {
-          --   method = \"POST\",
-          --   body = \"grant_type=client_credentials&client_id=...\",
-          --   headers = {[\"Content-Type\"] = \"application/x-www-form-urlencoded\"}
-          -- })
-          -- mock_token = res.body.access_token
-          
-          core.log.warn(\"Generated token: \", mock_token)
-          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. mock_token)
-        end"
-      ]
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "your-upstream-service:8080": 1
+      }
     }
-  },
-  "upstream": {
-    "nodes": {
-      "httpbin.org:80": 1
-    },
-    "type": "roundrobin"
-  }
-}'
+  }'
 
 
++++++++
+1. Lua Script for Bearer Token Generation
+-- bearer_token_generator.lua
+local _M = {}
 
-JWT_TOKEN=$(curl -s http://127.0.0.1:9080/apisix/plugin/jwt/sign?key=test-key | jq -r '.token')
+function _M.generate_bearer_token(client_id, client_secret)
+    local core = require("apisix.core")
+    local resty_http = require("resty.http")
+    local cjson = require("cjson")
+    
+    -- 1. Encode credentials (Basic Auth format)
+    local credentials = client_id .. ":" .. client_secret
+    local encoded_credentials = ngx.encode_base64(credentials)
+    
+    -- 2. Make token request
+    local httpc = resty_http.new()
+    local res, err = httpc:request_uri("https://auth-server.com/oauth/token", {
+        method = "POST",
+        body = "grant_type=client_credentials",
+        headers = {
+            ["Authorization"] = "Basic " .. encoded_credentials,
+            ["Content-Type"] = "application/x-www-form-urlencoded"
+        },
+        ssl_verify = false -- For testing only
+    })
+    
+    -- 3. Handle response
+    if not res then
+        core.log.error("Token request failed: ", err)
+        return nil, err
+    end
+    
+    if res.status >= 400 then
+        core.log.error("Token server error: ", res.status, " ", res.body)
+        return nil, res.body
+    end
+    
+    local token_data = cjson.decode(res.body)
+    return token_data.access_token
+end
 
-====================
+return _M
 
+
+2. APISIX Route Configuration
 curl http://127.0.0.1:9180/apisix/admin/routes/1 \
 -H 'X-API-KEY: your-admin-key' \
 -X PUT -d '
 {
-  "uri": "/proxy-api/*",
-  "name": "httpbin-proxy-route",
+  "uri": "/secure-api/*",
+  "name": "jwt-with-upstream-auth",
   "plugins": {
     "jwt-auth": {
       "key": "api-user",
       "secret": "your-jwt-secret-here",
-      "algorithm": "HS256"
+      "algorithm": "HS256",
+      "exp": 86400
     },
     "serverless-pre-function": {
       "phase": "rewrite",
       "functions": [
         "return function(conf, ctx)
           local core = require(\"apisix.core\")
+          local token_gen = require(\"bearer_token_generator\")
           
-          -- Generate dynamic Bearer token (mock for testing)
-          -- Replace this with your actual token generation logic
-          local dynamic_token = \"mock_\" .. tostring(math.random(10000,99999)) .. \"_\" .. ngx.time()
+          -- Get client credentials from secrets (or config)
+          local client_id = \"YOUR_CLIENT_ID\"
+          local client_secret = \"YOUR_CLIENT_SECRET\"
           
-          -- For production, use something like:
-          -- local dynamic_token = get_token_from_your_auth_service()
+          -- Generate Bearer token
+          local token, err = token_gen.generate_bearer_token(client_id, client_secret)
+          if not token then
+            core.log.error(\"Failed to generate token: \", err)
+            return ngx.exit(502)
+          end
           
-          -- Set the Authorization header for upstream
-          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. dynamic_token)
-          
-          -- Log for debugging (view in /usr/local/apisix/logs/error.log)
-          core.log.warn(\"Generated upstream token: \", dynamic_token)
+          -- Set Authorization header for upstream
+          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. token)
+          core.log.warn(\"Generated upstream token: \", token)
         end"
       ]
     },
@@ -97,47 +122,59 @@ curl http://127.0.0.1:9180/apisix/admin/routes/1 \
     "type": "roundrobin",
     "nodes": {
       "httpbin.org:80": 1
-    },
-    "scheme": "http"
+    }
   }
 }'
 
-==============
-Prod implementation:
-"serverless-pre-function": {
-  "phase": "rewrite",
-  "functions": [
-    "return function(conf, ctx)
-      local core = require(\"apisix.core\")
-      local http = require(\"resty.http\")
-      
-      -- 1. Try getting cached token
-      local cached_token = ngx.shared.token_cache:get(\"httpbin_token\")
-      if cached_token then
-        core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. cached_token)
-        return
-      end
-      
-      -- 2. Fetch new token from auth service
-      local httpc = http.new()
-      local res, err = httpc:request_uri(\"https://your-auth-service.com/token\", {
-        method = \"POST\",
-        body = \"grant_type=client_credentials\" ..
-               \"&client_id=\" .. core.secret.get(\"vault://client_id\") ..
-               \"&client_secret=\" .. core.secret.get(\"vault://client_secret\"),
-        headers = {
-          [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
-        }
-      })
-      
-      if not res then
-        core.log.error(\"Token fetch failed: \", err)
-        return ngx.exit(502)
-      end
-      
-      local token = core.json.decode(res.body).access_token
-      ngx.shared.token_cache:set(\"httpbin_token\", token, 300) -- Cache for 5 minutes
-      core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. token)
-    end"
-  ]
-}
+
+================================
+-- /opt/apisix/lua/fetch_token.lua
+return function(conf, ctx)
+  local core = require("apisix.core")
+  local http = require("resty.http")
+
+  local client_id = "your_client_id"
+  local client_secret = "your_client_secret"
+
+  local httpc = http.new()
+  local res, err = httpc:request_uri("https://auth.example.com/oauth/token", {
+    method = "POST",
+    body = "grant_type=client_credentials&client_id=" .. client_id .. "&client_secret=" .. client_secret,
+    headers = {
+      ["Content-Type"] = "application/x-www-form-urlencoded"
+    },
+    ssl_verify = false
+  })
+
+  if not res or res.status ~= 200 then
+    core.log.error("Failed to fetch token: ", err or res.status)
+    return ngx.exit(500)
+  end
+
+  local token_data = core.json.decode(res.body)
+  local access_token = token_data.access_token
+  core.request.set_header(ctx, "Authorization", "Bearer " .. access_token)
+end
+
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 \
+  -H "X-API-KEY: <your-admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uri": "/api/*",
+    "plugins": {
+      "jwt-auth": {},
+      "serverless-pre-function": {
+        "phase": "rewrite",
+        "functions": ["file:///opt/apisix/lua/fetch_token.lua"]
+      }
+    },
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "upstream.example.com:443": 1
+      },
+      "scheme": "https"
+    }
+  }'
+
