@@ -1,0 +1,115 @@
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -d '
+{
+  "uri": "/secure-api",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function()
+          local http = require(\"resty.http\")
+          local cjson = require(\"cjson.safe\")
+          local token_cache_key = \"upstream_token\"
+          local token_expiry_key = \"upstream_token_expiry\"
+          local token = ngx.shared.my_cache:get(token_cache_key)
+          local expiry = ngx.shared.my_cache:get(token_expiry_key)
+          local current_time = ngx.now()
+
+          if not token or not expiry or current_time >= expiry then
+            local client_id = \"your_client_id\"
+            local client_secret = \"your_client_secret\"
+            local token_url = \"https://auth.example.com/oauth/token\"
+
+            local httpc = http.new()
+            local res, err = httpc:request_uri(token_url, {
+              method = \"POST\",
+              body = \"grant_type=client_credentials&client_id=\" .. client_id .. \"&client_secret=\" .. client_secret,
+              headers = {
+                [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
+              },
+              ssl_verify = false
+            })
+
+            if not res or res.status ~= 200 then
+              ngx.status = 500
+              ngx.say(\"Failed to fetch upstream token: \", err or res.status)
+              return
+            end
+
+            local body = cjson.decode(res.body)
+            token = body.access_token
+            local expires_in = body.expires_in or 900
+            ngx.shared.my_cache:set(token_cache_key, token, expires_in - 60)
+            ngx.shared.my_cache:set(token_expiry_key, current_time + expires_in - 60, expires_in)
+          end
+
+          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "upstream.example.com:443": 1
+    },
+    "scheme": "https"
+  }
+}'
+
+
+
+
+=================
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -d '
+{
+  "uri": "/secure-api",
+  "plugins": {
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function()
+          local http = require(\"resty.http\")
+          local cjson = require(\"cjson.safe\")
+          local token_cache_key = \"upstream_token\"
+          local expiry_cache_key = \"upstream_token_expiry\"
+          local token = ngx.shared.my_cache:get(token_cache_key)
+          local expiry = ngx.shared.my_cache:get(expiry_cache_key)
+          local now = ngx.now()
+
+          if not token or not expiry or now >= expiry then
+            local httpc = http.new()
+            local res, err = httpc:request_uri(\"http://127.0.0.1:9000/oauth/token\", {
+              method = \"POST\",
+              body = \"grant_type=client_credentials&client_id=my-client-id&client_secret=my-client-secret\",
+              headers = {
+                [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
+              }
+            })
+
+            if not res or res.status ~= 200 then
+              ngx.status = 500
+              ngx.say(\"Token fetch error: \", err or res.status)
+              return
+            end
+
+            local data = cjson.decode(res.body)
+            token = data.access_token
+            local expires_in = data.expires_in or 900
+
+            ngx.shared.my_cache:set(token_cache_key, token, expires_in - 60)
+            ngx.shared.my_cache:set(expiry_cache_key, now + expires_in - 60, expires_in)
+          end
+
+          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "127.0.0.1:9001": 1
+    }
+  }
+}'
