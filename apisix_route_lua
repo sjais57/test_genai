@@ -1,53 +1,143 @@
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -H "X-API-KEY: <your-api-key>" -d '
+# Create a test route with in-memory caching (no shared dict needed)
+curl http://127.0.0.1:9180/apisix/admin/routes/1 \
+-H 'X-API-KEY: your-admin-key' \
+-X PUT -d '
 {
-  "uri": "/secure-api",
+  "uri": "/test/*",
   "plugins": {
-    "jwt-auth": {},
+    "jwt-auth": {
+      "key": "test-key",
+      "secret": "test-secret"
+    },
     "serverless-pre-function": {
-      "phase": "access",
+      "phase": "rewrite",
       "functions": [
-        "return function()
-          local cjson = require(\"cjson.safe\")
-          local auth = ngx.req.get_headers()[\"Authorization\"]
-          if not auth then
-            ngx.status = 401
-            ngx.say(\"Missing Authorization\")
+        "return function(conf, ctx)
+          local core = require(\"apisix.core\")
+          local http = require(\"resty.http\")
+          
+          -- Request-level caching
+          if ngx.ctx.cached_token then
+            core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. ngx.ctx.cached_token)
             return
           end
-          local _, _, token = string.find(auth, \"Bearer%s+(.+)\")
-          local function split(str, sep)
-            local result = {}
-            for m in (str .. sep):gmatch(\"(.-)\" .. sep) do
-              table.insert(result, m)
-            end
-            return result
-          end
-          local function base64url_decode(input)
-            input = input:gsub(\"-\", \"+\"):gsub(\"_\", \"/\")
-            local pad = 4 - (#input % 4)
-            if pad < 4 then input = input .. string.rep(\"=\", pad) end
-            return ngx.decode_base64(input)
-          end
-          local parts = split(token, \".\")
-          if #parts ~= 3 then
-            ngx.status = 401
-            ngx.say(\"Invalid JWT format\")
-            return
-          end
-          local payload_b64 = parts[2]
-          local payload_json = base64url_decode(payload_b64)
-          local payload = cjson.decode(payload_json)
-          if payload and payload.email then
-            ngx.req.set_header(\"X-Email\", payload.email)
-          end
+          
+          -- Mock token generation for testing
+          local mock_token = \"mock_\" .. tostring(math.random(10000,99999))
+          ngx.ctx.cached_token = mock_token
+          
+          -- For real implementation, replace with:
+          -- local httpc = http.new()
+          -- local res, err = httpc:request_uri(\"https://auth-server.com/token\", {
+          --   method = \"POST\",
+          --   body = \"grant_type=client_credentials&client_id=...\",
+          --   headers = {[\"Content-Type\"] = \"application/x-www-form-urlencoded\"}
+          -- })
+          -- mock_token = res.body.access_token
+          
+          core.log.warn(\"Generated token: \", mock_token)
+          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. mock_token)
         end"
       ]
     }
   },
   "upstream": {
-    "type": "roundrobin",
     "nodes": {
-      "127.0.0.1:9001": 1
-    }
+      "httpbin.org:80": 1
+    },
+    "type": "roundrobin"
   }
 }'
+
+
+
+JWT_TOKEN=$(curl -s http://127.0.0.1:9080/apisix/plugin/jwt/sign?key=test-key | jq -r '.token')
+
+====================
+
+curl http://127.0.0.1:9180/apisix/admin/routes/1 \
+-H 'X-API-KEY: your-admin-key' \
+-X PUT -d '
+{
+  "uri": "/proxy-api/*",
+  "name": "httpbin-proxy-route",
+  "plugins": {
+    "jwt-auth": {
+      "key": "api-user",
+      "secret": "your-jwt-secret-here",
+      "algorithm": "HS256"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)
+          local core = require(\"apisix.core\")
+          
+          -- Generate dynamic Bearer token (mock for testing)
+          -- Replace this with your actual token generation logic
+          local dynamic_token = \"mock_\" .. tostring(math.random(10000,99999)) .. \"_\" .. ngx.time()
+          
+          -- For production, use something like:
+          -- local dynamic_token = get_token_from_your_auth_service()
+          
+          -- Set the Authorization header for upstream
+          core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. dynamic_token)
+          
+          -- Log for debugging (view in /usr/local/apisix/logs/error.log)
+          core.log.warn(\"Generated upstream token: \", dynamic_token)
+        end"
+      ]
+    },
+    "proxy-rewrite": {
+      "uri": "/api/jo",
+      "host": "httpbin.org"
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org:80": 1
+    },
+    "scheme": "http"
+  }
+}'
+
+==============
+Prod implementation:
+"serverless-pre-function": {
+  "phase": "rewrite",
+  "functions": [
+    "return function(conf, ctx)
+      local core = require(\"apisix.core\")
+      local http = require(\"resty.http\")
+      
+      -- 1. Try getting cached token
+      local cached_token = ngx.shared.token_cache:get(\"httpbin_token\")
+      if cached_token then
+        core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. cached_token)
+        return
+      end
+      
+      -- 2. Fetch new token from auth service
+      local httpc = http.new()
+      local res, err = httpc:request_uri(\"https://your-auth-service.com/token\", {
+        method = \"POST\",
+        body = \"grant_type=client_credentials\" ..
+               \"&client_id=\" .. core.secret.get(\"vault://client_id\") ..
+               \"&client_secret=\" .. core.secret.get(\"vault://client_secret\"),
+        headers = {
+          [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
+        }
+      })
+      
+      if not res then
+        core.log.error(\"Token fetch failed: \", err)
+        return ngx.exit(502)
+      end
+      
+      local token = core.json.decode(res.body).access_token
+      ngx.shared.token_cache:set(\"httpbin_token\", token, 300) -- Cache for 5 minutes
+      core.request.set_header(ctx, \"Authorization\", \"Bearer \" .. token)
+    end"
+  ]
+}
