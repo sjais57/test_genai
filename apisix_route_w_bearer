@@ -113,3 +113,57 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 -d '
     }
   }
 }'
+
+
+=================
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/secure-api \
+  -H "X-API-KEY: <your-admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "uri": "/secure-api",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function()
+          local http = require(\"resty.http\")
+          local cjson = require(\"cjson.safe\")
+
+          local client_id = \"your_client_id\"
+          local client_secret = \"your_client_secret\"
+          local token_url = \"https://auth.example.com/oauth/token\"
+
+          local httpc = http.new()
+          local res, err = httpc:request_uri(token_url, {
+              method = \"POST\",
+              body = \"grant_type=client_credentials&client_id=\" .. client_id .. \"&client_secret=\" .. client_secret,
+              headers = {
+                  [\"Content-Type\"] = \"application/x-www-form-urlencoded\"
+              },
+              ssl_verify = false
+          })
+
+          if not res or res.status ~= 200 then
+              ngx.status = 500
+              ngx.say(\"Failed to fetch token: \", err or res.status)
+              return
+          end
+
+          local body = cjson.decode(res.body)
+          local token = body.access_token
+          ngx.req.set_header(\"Authorization\", \"Bearer \" .. token)
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream.example.com:443": 1
+    }
+  }
+}'
+
