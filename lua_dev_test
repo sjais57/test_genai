@@ -1,49 +1,115 @@
-Option 2: Using Lua Code Inline (Simpler, for Dev/Test)
-If you don’t want a full plugin, but still want to separate code logically, 
-  you can define a Lua module in /usr/local/apisix/lua/my_token_utils.lua:
+local http = require "resty.http"
+local cjson = require "cjson"
 
--- my_token_utils.lua
-local M = {}
-
-function M.get_token()
-    local http = require("resty.http")
-    local cjson = require("cjson.safe")
+local function get_bearer_token()
     local httpc = http.new()
-
-    local res, err = httpc:request_uri("https://auth.example.com/oauth/token", {
+    local res, err = httpc:request_uri("https://auth.example.com/oauth2/token", {
         method = "POST",
-        body = "grant_type=client_credentials&client_id=your-client-id&client_secret=your-client-secret",
+        body = "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET",
         headers = {
             ["Content-Type"] = "application/x-www-form-urlencoded"
-        },
-        ssl_verify = false
+        }
     })
 
-    if not res or res.status ~= 200 then
-        return nil
+    if not res then
+        ngx.log(ngx.ERR, "Failed to get token: ", err)
+        return
     end
 
-    local data = cjson.decode(res.body)
-    return data and data.access_token or nil
+    local body = cjson.decode(res.body)
+    return body.access_token
 end
 
-return M
-
-
-  Then in the serverless-pre-function plugin inline script:
-
-  return function()
-  local token_utils = require("my_token_utils")
-  local token = token_utils.get_token()
-  if token then
-    ngx.req.set_header("Authorization", "Bearer " .. token)
-  else
-    ngx.status = 500
-    ngx.say("Unable to get upstream token")
-    return ngx.exit(500)
-  end
+-- Save token to context for use in upstream
+local token = get_bearer_token()
+if token then
+    ngx.ctx.bearer_token = token
 end
 
-  Make sure the Lua module path is discoverable (via lua_package_path in APISIX config or placing it in /usr/local/apisix/lua/).
+============================================
+local http = require "resty.http"
+local cjson = require "cjson"
 
-  
+local function get_bearer_token()
+    local httpc = http.new()
+    local res, err = httpc:request_uri("https://auth.example.com/oauth2/token", {
+        method = "POST",
+        body = "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET",
+        headers = {
+            ["Content-Type"] = "application/x-www-form-urlencoded"
+        }
+    })
+
+    if not res then
+        ngx.log(ngx.ERR, "Token fetch failed: ", err)
+        return
+    end
+
+    local token_data = cjson.decode(res.body)
+    ngx.ctx.bearer_token = token_data.access_token
+end
+
+get_bearer_token()
+
+
+=========================
+{
+  "uri": "/api/job/id",
+  "plugins": {
+    "jwt-auth": {
+      "key": "your-jwt-key",
+      "secret": "your-jwt-secret"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": ["return require('get_token')"]
+    },
+    "proxy-rewrite": {
+      "headers": {
+        "Authorization": "Bearer $(ctx.bearer_token)",
+        "Content-Type": "application/json",
+        "username": "your-upstream-username"
+      }
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "your-upstream.com:443": 1
+    },
+    "timeout": {
+      "connect": 3,
+      "send": 5,
+      "read": 10
+    }
+  }
+}
+
+
+===============
+
+"serverless-pre-function": {
+  "phase": "rewrite",
+  "functions": [
+    "
+    local http = require 'resty.http'
+    local cjson = require 'cjson'
+    local httpc = http.new()
+    local res, err = httpc:request_uri('https://auth.example.com/oauth2/token', {
+        method = 'POST',
+        body = 'grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET',
+        headers = {
+            ['Content-Type'] = 'application/x-www-form-urlencoded'
+        }
+    })
+    if not res then
+        ngx.log(ngx.ERR, 'Failed to get token: ', err)
+        return
+    end
+    local token_data = cjson.decode(res.body)
+    ngx.ctx.bearer_token = token_data.access_token
+    "
+  ]
+}
+
