@@ -12,35 +12,6 @@ local function get_bearer_token()
     })
 
     if not res then
-        ngx.log(ngx.ERR, "Failed to get token: ", err)
-        return
-    end
-
-    local body = cjson.decode(res.body)
-    return body.access_token
-end
-
--- Save token to context for use in upstream
-local token = get_bearer_token()
-if token then
-    ngx.ctx.bearer_token = token
-end
-
-============================================
-local http = require "resty.http"
-local cjson = require "cjson"
-
-local function get_bearer_token()
-    local httpc = http.new()
-    local res, err = httpc:request_uri("https://auth.example.com/oauth2/token", {
-        method = "POST",
-        body = "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET",
-        headers = {
-            ["Content-Type"] = "application/x-www-form-urlencoded"
-        }
-    })
-
-    if not res then
         ngx.log(ngx.ERR, "Token fetch failed: ", err)
         return
     end
@@ -52,7 +23,8 @@ end
 get_bearer_token()
 
 
-=========================
+================
+
 {
   "uri": "/api/job/id",
   "plugins": {
@@ -87,29 +59,55 @@ get_bearer_token()
 }
 
 
-===============
-
-"serverless-pre-function": {
-  "phase": "rewrite",
-  "functions": [
-    "
-    local http = require 'resty.http'
-    local cjson = require 'cjson'
-    local httpc = http.new()
-    local res, err = httpc:request_uri('https://auth.example.com/oauth2/token', {
-        method = 'POST',
-        body = 'grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET',
-        headers = {
-            ['Content-Type'] = 'application/x-www-form-urlencoded'
-        }
-    })
-    if not res then
-        ngx.log(ngx.ERR, 'Failed to get token: ', err)
-        return
-    end
-    local token_data = cjson.decode(res.body)
-    ngx.ctx.bearer_token = token_data.access_token
-    "
-  ]
+===========
+{
+  "uri": "/api/job/id",
+  "plugins": {
+    "jwt-auth": {
+      "key": "your-jwt-key",
+      "secret": "your-jwt-secret"
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "
+        local http = require 'resty.http'
+        local cjson = require 'cjson'
+        local httpc = http.new()
+        local res, err = httpc:request_uri('https://auth.example.com/oauth2/token', {
+            method = 'POST',
+            body = 'grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET',
+            headers = {
+                ['Content-Type'] = 'application/x-www-form-urlencoded'
+            }
+        })
+        if not res then
+            ngx.log(ngx.ERR, 'Token fetch failed: ', err)
+            return
+        end
+        local token_data = cjson.decode(res.body)
+        ngx.ctx.bearer_token = token_data.access_token
+        "
+      ]
+    },
+    "proxy-rewrite": {
+      "headers": {
+        "Authorization": "Bearer $(ctx.bearer_token)",
+        "Content-Type": "application/json",
+        "username": "upstream-username"
+      }
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "your-upstream.com:443": 1
+    },
+    "timeout": {
+      "connect": 3,
+      "send": 5,
+      "read": 10
+    }
+  }
 }
-
