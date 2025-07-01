@@ -1,0 +1,139 @@
+import yaml
+import json
+
+# Load your YAML file
+with open("model_families.yaml", "r") as f:
+    data = yaml.safe_load(f)
+
+# Example template
+template_str = '''
+{
+  "aihpc": {
+    "model_name": "{aihpc.model_name}",
+    "supported_frameworks": "{supported_frameworks}"
+  }
+}
+'''
+
+# model_name comes from request (or another file)
+model_name = request.model_name  # or wherever you get it
+# Example for testing:
+# model_name = "LLaMA-2"
+
+# Search YAML for this model's supported frameworks
+supported_frameworks = None
+for family in data["model_families"]:
+    for model in family["models"]:
+        if model["name"].lower() == model_name.lower():
+            supported_frameworks = model.get("supported_frameworks", [])
+            break
+    if supported_frameworks is not None:
+        break
+
+if supported_frameworks is None:
+    raise ValueError(f"Model '{model_name}' not found in YAML!")
+
+# Replace placeholders
+template_str = template_str.replace("{aihpc.model_name}", model_name)
+template_str = template_str.replace('"{supported_frameworks}"', json.dumps(supported_frameworks))
+
+# Parse to final JSON
+filled_templ = json.loads(template_str)
+
+# Show result
+print(json.dumps(filled_templ, indent=2))
+
+
+======
+
+import yaml
+import json
+
+# Simulate model_name received from Rego / policy
+# In your real code you'd get this via request or file input
+model_name = "LLaMA-2"  # for example
+
+# Load YAML config
+with open("model_families.yaml", "r") as f:
+    data = yaml.safe_load(f)
+
+# Find supported_frameworks for model_name
+supported_frameworks = None
+for family in data["model_families"]:
+    for model in family["models"]:
+        if model["name"].lower() == model_name.lower():
+            supported_frameworks = model.get("supported_frameworks", [])
+            break
+    if supported_frameworks is not None:
+        break
+
+if supported_frameworks is None:
+    raise ValueError(f"Model '{model_name}' not found in YAML!")
+
+# Example template string
+template_str = '''
+{
+  "aihpc": {
+    "model_name": "{aihpc.model_name}",
+    "supported_frameworks": "{supported_frameworks}"
+  }
+}
+'''
+
+# Replace placeholders
+template_str = template_str.replace("{aihpc.model_name}", model_name)
+template_str = template_str.replace('"{supported_frameworks}"', json.dumps(supported_frameworks))
+
+# Parse JSON
+filled_templ = json.loads(template_str)
+
+# Output final filled template
+print(json.dumps(filled_templ, indent=2))
+
+
+=====================
+
+import yaml
+import json
+
+# Load YAML config
+with open("model_families.yaml", "r") as f:
+    data = yaml.safe_load(f)
+
+# model_name already came from Rego logic
+# Example if testing manually:
+# model_name = "LLaMA-2"
+
+# Search YAML for supported_frameworks dynamically
+supported_frameworks = None
+for family in data["model_families"]:
+    for model in family["models"]:
+        if model["name"].lower() == model_name.lower():
+            supported_frameworks = model.get("supported_frameworks", [])
+            break
+    if supported_frameworks is not None:
+        break
+
+if supported_frameworks is None:
+    raise ValueError(f"Model '{model_name}' not found in YAML!")
+
+# Template string (your existing template)
+template_str = '''
+{
+  "aihpc": {
+    "model_name": "{aihpc.model_name}",
+    "supported_frameworks": "{supported_frameworks}"
+  }
+}
+'''
+
+# Replace placeholders dynamically
+template_str = template_str.replace("{aihpc.model_name}", model_name)
+template_str = template_str.replace('"{supported_frameworks}"', json.dumps(supported_frameworks))
+
+# Parse final JSON
+filled_templ = json.loads(template_str)
+
+# Output
+print(json.dumps(filled_templ, indent=2))
+
