@@ -1,0 +1,77 @@
+# Add this function at the bottom of app_jwt.py or in a separate utils file
+
+from claims.group_category import get_user_category
+from utils.api_key import get_additional_claims, get_api_key_metadata
+
+def generate_tokens_for_user(username, password, api_key=None, custom_secret=None):
+    if AUTH_METHOD == "ldap":
+        authenticated, user_data = authenticate_ldap(username, password)
+    else:
+        authenticated, user_data = authenticate_file(username, password)
+
+    if not authenticated:
+        return {"error": "Invalid credentials"}
+
+    user_context = {
+        "user_id": username,
+        "email": user_data.get("email", ""),
+        "groups": user_data.get("groups", []),
+        "roles": user_data.get("roles", []),
+        "team_id": get_team_id_from_user(username, user_data),
+        "api_key_id": api_key
+    }
+
+    if api_key:
+        api_key_claims = get_additional_claims(api_key, user_context)
+        api_key_metadata = get_api_key_metadata(api_key)
+
+        if "user_category" not in api_key_claims:
+            user_category = get_user_category(
+                user_groups=user_context.get("groups", []),
+                lookup_mode="TIERED_MATCH",
+                metadata=api_key_metadata
+            )
+            api_key_claims["user_category"] = user_category
+    else:
+        api_key_claims = get_additional_claims(None, user_context)
+
+    claims = {**user_data, **api_key_claims}
+
+    # Token expiration
+    expires_delta = timedelta(hours=claims.get("exp_hours", 1))
+    claims.pop("exp_hours", None)
+
+    now = datetime.utcnow()
+    access_payload = {
+        "iat": now,
+        "nbf": now,
+        "jti": str(uuid.uuid4()),
+        "exp": now + expires_delta,
+        "sub": username,
+        "type": "access",
+        "fresh": True,
+        **claims
+    }
+
+    refresh_payload = {
+        "iat": now,
+        "nbf": now,
+        "jti": str(uuid.uuid4()),
+        "exp": now + timedelta(days=30),
+        "sub": username,
+        "type": "refresh",
+        **claims
+    }
+
+    import jwt as pyjwt
+    secret = custom_secret or app.config["JWT_SECRET_KEY"]
+    algorithm = app.config.get("JWT_ALGORITHM", "HS256")
+
+    access_token = pyjwt.encode(access_payload, secret, algorithm=algorithm)
+    refresh_token = pyjwt.encode(refresh_payload, secret, algorithm=algorithm)
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "claims": claims
+    }
