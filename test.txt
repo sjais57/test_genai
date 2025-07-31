@@ -1,0 +1,36 @@
+def get_metadata_filters(user_groups, metadata_filters, **kwargs):
+    for rule in metadata_filters:
+        match_type = rule.get("match_type")
+
+        if match_type == "startswith":
+            prefix = rule.get("group_prefix", "")
+            for group in user_groups:
+                if group.startswith(prefix):
+                    return {"classification": rule["value"][-1]}
+
+        elif match_type == "exact":
+            group_name = rule.get("group_name")
+            if group_name in user_groups:
+                return {"classification": rule["value"][-1]}
+    
+    return {"classification": "public"}  # default fallback
+
+
+=============
+
+metadata:
+  type: function
+  module: claims.group_category
+  function: get_metadata_filters
+  args:
+    user_groups: "[groups]"
+    metadata_filters:
+      - match_type: "startswith"
+        group_prefix: "adspsa_"
+        value:
+          - proprietary
+          - confidential
+      - match_type: "exact"
+        group_name: "alngc_maltas_maltatat_tp_busp"
+        value:
+          - confidential
