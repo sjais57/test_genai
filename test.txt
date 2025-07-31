@@ -1,19 +1,30 @@
 def get_metadata_filters(user_groups, metadata_filters, **kwargs):
-    for rule in metadata_filters:
-        match_type = rule.get("match_type")
-
-        if match_type == "startswith":
-            prefix = rule.get("group_prefix", "")
-            for group in user_groups:
-                if group.startswith(prefix):
-                    return {"classification": rule["value"][-1]}
-
-        elif match_type == "exact":
-            group_name = rule.get("group_name")
-            if group_name in user_groups:
-                return {"classification": rule["value"][-1]}
+    logger.info(f"user_groups received: {user_groups}")
+    logger.info(f"Evaluating metadata_filters for metadata_filters: {metadata_filters}")
     
-    return {"classification": "public"}  # default fallback
+    for group in user_groups:
+        cn = extract_cn(group)
+        for metadata_filter in metadata_filters:
+            match_type = metadata_filter.get("match_type")
+            
+            if match_type == "startswith":
+                prefix = metadata_filter.get("group_prefix", "")
+                if prefix and cn.startswith(prefix):
+                    value = metadata_filter.get("value", [])
+                    classification = value[-1] if isinstance(value, list) and value else value
+                    logger.info(f"CN '{cn}' matches prefix '{prefix}'. Returning classification: {classification}")
+                    return {"classification": classification}
+                    
+            elif match_type == "exact":
+                name = metadata_filter.get("group_name")
+                if name and cn == name:
+                    value = metadata_filter.get("value", [])
+                    classification = value[-1] if isinstance(value, list) and value else value
+                    logger.info(f"CN '{cn}' matches exact name '{name}'. Returning classification: {classification}")
+                    return {"classification": classification}
+    
+    logger.info("No matching group found. Returning default classification: public.")
+    return {"classification": "public"}  # Optional fallback
 
 
 =============
