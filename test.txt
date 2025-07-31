@@ -1,38 +1,29 @@
-def get_metadata_filters(user_groups=None, metadata_filters=None, **kwargs):
+def get_metadata_filters(user_groups, metadata_filters, **kwargs):
     logger.info(f"user_groups received: {user_groups}")
     logger.info(f"Evaluating metadata_filters: {metadata_filters}")
-
-    if user_groups is None or metadata_filters is None:
-        logger.warning("Missing required args: user_groups or metadata_filters")
-        return None
-
+    
     for group in user_groups:
         cn = extract_cn(group)
-        logger.info(f"Extracted CN: {cn}")
-        
         for metadata_filter in metadata_filters:
             match_type = metadata_filter.get("match_type")
-            values = metadata_filter.get("value", [])
-
-            # Normalize to list
-            if not isinstance(values, list):
-                values = [values]
-
+            
             if match_type == "startswith":
                 prefix = metadata_filter.get("group_prefix", "")
                 if prefix and cn.startswith(prefix):
-                    classification = values[-1] if values else None
-                    logger.info(f"CN '{cn}' matched prefix '{prefix}', classification: {classification}")
+                    value = metadata_filter.get("value", [])
+                    classification = value[-1] if isinstance(value, list) and value else value
+                    logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning classification: {classification}")
                     return {"metadata": {"classification": classification}}
-
+                    
             elif match_type == "exact":
-                group_name = metadata_filter.get("group_name", "")
-                if group_name and cn == group_name:
-                    classification = values[-1] if values else None
-                    logger.info(f"CN '{cn}' matched exact name '{group_name}', classification: {classification}")
+                name = metadata_filter.get("group_name")
+                if name and cn == name:
+                    value = metadata_filter.get("value", [])
+                    classification = value[-1] if isinstance(value, list) and value else value
+                    logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning classification: {classification}")
                     return {"metadata": {"classification": classification}}
 
-    logger.info("No match found in metadata_filters. Returning None.")
+    logger.info("No matching group found. Returning None.")
     return None
 
 =============
