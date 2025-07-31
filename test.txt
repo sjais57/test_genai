@@ -1,35 +1,39 @@
 def get_metadata_filters(user_groups, metadata_filters, **kwargs):
     logger.info(f"user_groups received: {user_groups}")
     logger.info(f"Evaluating metadata_filters: {metadata_filters}")
-    
+
     for group in user_groups:
         cn = extract_cn(group)
+        logger.info(f"Extracted CN: {cn}")
+        
         for metadata_filter in metadata_filters:
             match_type = metadata_filter.get("match_type")
-            
+            values = metadata_filter.get("value", [])
+
+            # Normalize to list
+            if not isinstance(values, list):
+                values = [values]
+
+            # Return the last value in the list if matched
             if match_type == "startswith":
                 prefix = metadata_filter.get("group_prefix", "")
                 if prefix and cn.startswith(prefix):
-                    value = metadata_filter.get("value", [])
-                    classification = value[-1] if isinstance(value, list) and value else value
-                    logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning classification: {classification}")
-                    return {"classification": classification}
-                    
+                    classification = values[-1] if values else None
+                    logger.info(f"CN '{cn}' matched prefix '{prefix}', classification: {classification}")
+                    return {"metadata": {"classification": classification}}
+
             elif match_type == "exact":
-                name = metadata_filter.get("group_name")
-                if name and cn == name:
-                    value = metadata_filter.get("value", [])
-                    classification = value[-1] if isinstance(value, list) and value else value
-                    logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning classification: {classification}")
-                    return {"classification": classification}
+                group_name = metadata_filter.get("group_name", "")
+                if group_name and cn == group_name:
+                    classification = values[-1] if values else None
+                    logger.info(f"CN '{cn}' matched exact name '{group_name}', classification: {classification}")
+                    return {"metadata": {"classification": classification}}
 
-    logger.info("No matching group found. Returning None.")
+    logger.info("No match found in metadata_filters. Returning None.")
     return None
-
-
 =============
 
-metadata:
+dynamic_metadata:
   type: function
   module: claims.group_category
   function: get_metadata_filters
@@ -41,6 +45,11 @@ metadata:
         value:
           - proprietary
           - confidential
+      - match_type: "exact"
+        group_name: "alngc_maltas_maltatat_tp_busp"
+        value:
+          - confidential
+
       - match_type: "exact"
         group_name: "alngc_maltas_maltatat_tp_busp"
         value:
