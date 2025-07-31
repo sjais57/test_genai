@@ -1,30 +1,27 @@
 def get_metadata_filters(user_groups, metadata_filters, **kwargs):
     logger.info(f"user_groups received: {user_groups}")
     logger.info(f"Evaluating metadata_filters: {metadata_filters}")
-    
     for group in user_groups:
         cn = extract_cn(group)
-        for metadata_filter in metadata_filters:
-            match_type = metadata_filter.get("match_type")
-            
+        for rule in metadata_filters:
+            match_type = rule.get("match_type")
             if match_type == "startswith":
-                prefix = metadata_filter.get("group_prefix", "")
+                prefix = rule.get("group_prefix")
                 if prefix and cn.startswith(prefix):
-                    value = metadata_filter.get("value", [])
+                    value = rule.get("value")
                     classification = value[-1] if isinstance(value, list) and value else value
                     logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning classification: {classification}")
                     return {"metadata": {"classification": classification}}
-                    
             elif match_type == "exact":
-                name = metadata_filter.get("group_name")
+                name = rule.get("group_name")
                 if name and cn == name:
-                    value = metadata_filter.get("value", [])
+                    value = rule.get("value")
                     classification = value[-1] if isinstance(value, list) and value else value
                     logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning classification: {classification}")
                     return {"metadata": {"classification": classification}}
-
     logger.info("No matching group found. Returning None.")
     return None
+
 
 =============
 
