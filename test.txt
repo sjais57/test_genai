@@ -1,102 +1,66 @@
-def get_metadata_filters(user_groups, classification, **kwargs):
-    logger.info(f"user_groups received: {user_groups}")
-    logger.info(f"Evaluating classification rules: {classification}")
+import logging
+from typing import List, Dict, Any
 
-    classification_values = []
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-    for group in user_groups:
-        cn = extract_cn(group)
-        for rule in classification:
-            match_type = rule.get("match_type")
-
-            if match_type == "startswith":
-                prefix = rule.get("group_prefix")
-                if prefix and cn.startswith(prefix):
-                    logger.info(f"CN '{cn}' matches prefix '{prefix}'")
-                    classification_values.extend(rule.get("value", []))
-
-            elif match_type == "exact":
-                name = rule.get("group_name")
-                if name and cn == name:
-                    logger.info(f"CN '{cn}' matches exact group name '{name}'")
-                    classification_values.extend(rule.get("value", []))
-
-    if classification_values:
-        # Remove duplicates and build list of {"classification": value}
-        metadata_list = [{"classification": val} for val in sorted(set(classification_values))]
-        return {"metadata": metadata_list}
-
-    return None
-
-
-============
-
-def get_metadata_filters(user_groups, classification, **kwargs):
+def get_user_category(user_groups: List[str], lookup_mode: str = 'FIRST_MATCH', **kwargs) -> Dict[str, Any]:
     """
-    Returns metadata with classification values as a comma-separated string.
+    Assign user to a category based on group membership and lookup mode.
     
     Args:
-        user_groups: List of user's group DNs (e.g., ["cn=dspsa_team,ou=groups"])
-        classification: List of classification rules from YAML config
-        
+        user_groups: List of groups the user belongs to
+        lookup_mode: 'FIRST_MATCH', 'ALL_MATCHES', or 'TIERED_MATCH'
+        metadata: (kwarg) metadata dictionary containing 'categories'
     Returns:
-        {
-            "metadata": {
-                "classification": "proprietary, confidential"  # Single comma-separated string
-            }
-        }
-        or None if no matches
+        Dict with category assignment result including all category data from metadata
     """
-    for group in user_groups:
-        # Extract common name (cn) from group DN
-        cn = group.split(',')[0].split('=')[1] if '=' in group else group
-        
-        for rule in classification:
-            # Check startswith rule (for dspsa_ groups)
-            if rule.get('match_type') == 'startswith':
-                prefix = rule.get('group_prefix')
-                if prefix and cn.startswith(prefix):
-                    values = rule.get('value', [])
-                    if values:
-                        return {
-                            "metadata": {
-                                "classification": ", ".join(values)
-                            }
-                        }
-            
-            # Check exact match rule (for specific groups)
-            elif rule.get('match_type') == 'exact':
-                group_name = rule.get('group_name')
-                if group_name and cn == group_name:
-                    values = rule.get('value', [])
-                    if values:
-                        return {
-                            "metadata": {
-                                "classification": ", ".join(values)
-                            }
-                        }
+    logger.info(f"Assigning user category for groups: {user_groups} with mode: {lookup_mode}")
     
-    return None
-=============
+    # Get metadata from kwargs
+    metadata = kwargs.get('metadata', {})
+    logger.info(f"Metadata received: {metadata}")
+    
+    if not metadata:
+        logger.warning("No metadata provided")
+        return {"category": None, "match_mode": lookup_mode, "reason": "No metadata provided"}
+    
+    categories = metadata.get('categories', {})
+    if not categories:
+        logger.warning("No categories found in metadata")
+        return {"category": None, "match_mode": lookup_mode, "reason": "No categories in metadata"}
 
-dynamic_metadata:
-  type: function
-  module: claims.group_category
-  function: get_metadata_filters
-  args:
-    user_groups: "[groups]"
-    metadata_filters:
-      - match_type: "startswith"
-        group_prefix: "adspsa_"
-        value:
-          - proprietary
-          - confidential
-      - match_type: "exact"
-        group_name: "alngc_maltas_maltatat_tp_busp"
-        value:
-          - confidential
+    matches = []
+    for cat_name, cat_data in categories.items():
+        cat_groups = cat_data.get('groups', [])
+        # If any group matches, consider this category
+        if any(g in user_groups for g in cat_groups):
+            # Include all category data from metadata
+            full_category = {
+                "name": cat_name,
+                **cat_data  # Include all properties from the category definition
+            }
+            matches.append(full_category)
 
-      - match_type: "exact"
-        group_name: "alngc_maltas_maltatat_tp_busp"
-        value:
-          - confidential
+    if lookup_mode == 'FIRST_MATCH':
+        if matches:
+            return {"category": matches[0], "match_mode": lookup_mode}
+        else:
+            return {"category": None, "match_mode": lookup_mode, "reason": "No match"}
+    elif lookup_mode == 'ALL_MATCHES':
+        return {"categories": matches, "match_mode": lookup_mode}
+    elif lookup_mode == 'TIERED_MATCH':
+        # Assume each category has a 'tier' field for ranking (higher is better)
+        if matches:
+            best = max(matches, key=lambda x: x.get('tier', 0))
+            return {
+                "category": best,
+                "match_mode": lookup_mode,
+                "destURL": best.get('destURL'),  # Include destination URL
+                "tier": best.get('tier')          # Include tier information
+            }
+        else:
+            return {"category": None, "match_mode": lookup_mode, "reason": "No match"}
+    else:
+        logger.warning(f"Unknown lookup_mode: {lookup_mode}")
+        return {"category": None, "match_mode": lookup_mode, "reason": "Unknown lookup_mode"}
