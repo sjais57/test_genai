@@ -29,6 +29,54 @@ def get_metadata_filters(user_groups, classification, **kwargs):
     return None
 
 
+============
+
+def get_metadata_filters(user_groups, classification, **kwargs):
+    """
+    Returns metadata with classification values as a comma-separated string.
+    
+    Args:
+        user_groups: List of user's group DNs (e.g., ["cn=dspsa_team,ou=groups"])
+        classification: List of classification rules from YAML config
+        
+    Returns:
+        {
+            "metadata": {
+                "classification": "proprietary, confidential"  # Single comma-separated string
+            }
+        }
+        or None if no matches
+    """
+    for group in user_groups:
+        # Extract common name (cn) from group DN
+        cn = group.split(',')[0].split('=')[1] if '=' in group else group
+        
+        for rule in classification:
+            # Check startswith rule (for dspsa_ groups)
+            if rule.get('match_type') == 'startswith':
+                prefix = rule.get('group_prefix')
+                if prefix and cn.startswith(prefix):
+                    values = rule.get('value', [])
+                    if values:
+                        return {
+                            "metadata": {
+                                "classification": ", ".join(values)
+                            }
+                        }
+            
+            # Check exact match rule (for specific groups)
+            elif rule.get('match_type') == 'exact':
+                group_name = rule.get('group_name')
+                if group_name and cn == group_name:
+                    values = rule.get('value', [])
+                    if values:
+                        return {
+                            "metadata": {
+                                "classification": ", ".join(values)
+                            }
+                        }
+    
+    return None
 =============
 
 dynamic_metadata:
