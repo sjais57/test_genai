@@ -1,3 +1,45 @@
+def get_metadata_filters(user_groups, classification, **kwargs):
+    logger.info(f"user_groups received: {user_groups}")
+    logger.info(f"Evaluating classification rules: {classification}")
+
+    classification_values = []
+
+    for group in user_groups:
+        cn = extract_cn(group)
+        for rule in classification:
+            match_type = rule.get("match_type")
+
+            if match_type == "startswith":
+                prefix = rule.get("group_prefix")
+                if prefix and cn.startswith(prefix):
+                    logger.info(f"CN '{cn}' matches prefix '{prefix}'")
+                    classification_values.extend(rule.get("value", []))
+
+            elif match_type == "exact":
+                name = rule.get("group_name")
+                if name and cn == name:
+                    logger.info(f"CN '{cn}' matches exact group name '{name}'")
+                    classification_values.extend(rule.get("value", []))
+
+    if classification_values:
+        # Deduplicate and sort for consistency (optional)
+        unique_values = sorted(set(classification_values))
+        metadata_output = [{"classification": unique_values}]
+        logger.info(f"Returning metadata: {metadata_output}")
+        return {"metadata": metadata_output}
+
+    logger.info("No matching group found for classification rules. Returning None.")
+    return None
+
+
+
+
+
+
+
+
+
+
 import logging
 from typing import List, Dict, Any
 
