@@ -22,14 +22,14 @@ def get_metadata_filters(user_groups, classification, **kwargs):
                     classification_values.extend(rule.get("value", []))
 
     if classification_values:
-        # Deduplicate and sort for consistency (optional)
+        # Deduplicate and sort values (optional)
         unique_values = sorted(set(classification_values))
-        metadata_output = [{"classification": unique_values}]
-        logger.info(f"Returning metadata: {metadata_output}")
-        return {"metadata": metadata_output}
+        logger.info(f"Returning classification: {unique_values}")
+        return {"classification": unique_values}
 
     logger.info("No matching group found for classification rules. Returning None.")
     return None
+
 
 
 
