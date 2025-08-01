@@ -1,31 +1,33 @@
 def get_metadata_filters(user_groups, classification, **kwargs):
     logger.info(f"user_groups received: {user_groups}")
-    logger.info(f"Evaluating classification: {classification}")
-    
+    logger.info(f"Evaluating classification rules: {classification}")
+
+    classification_values = []
+
     for group in user_groups:
         cn = extract_cn(group)
-        for classifications in classification:
-            match_type = classifications.get("match_type")
+        for rule in classification:
+            match_type = rule.get("match_type")
+
             if match_type == "startswith":
-                prefix = classifications.get("group_prefix")
+                prefix = rule.get("group_prefix")
                 if prefix and cn.startswith(prefix):
-                    logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning metadata.")
-                    # Convert list values into separate dictionary keys
-                    metadata = {"classification": classifications["value"][0]}
-                    if len(classifications["value"]) > 1:
-                        metadata["confidential"] = classifications["value"][1]
-                    return metadata
+                    logger.info(f"CN '{cn}' matches prefix '{prefix}'")
+                    classification_values.extend(rule.get("value", []))
+
             elif match_type == "exact":
-                name = classifications.get("group_name")
+                name = rule.get("group_name")
                 if name and cn == name:
-                    logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning metadata.")
-                    metadata = {"classification": classifications["value"][0]}
-                    if len(classifications["value"]) > 1:
-                        metadata["confidential"] = classifications["value"][1]
-                    return metadata
-    
-    logger.info("No matching group found for classification rules. Returning None.")
+                    logger.info(f"CN '{cn}' matches exact group name '{name}'")
+                    classification_values.extend(rule.get("value", []))
+
+    if classification_values:
+        # Remove duplicates and build list of {"classification": value}
+        metadata_list = [{"classification": val} for val in sorted(set(classification_values))]
+        return {"metadata": metadata_list}
+
     return None
+
 
 =============
 
