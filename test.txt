@@ -1,27 +1,31 @@
-def get_metadata_filters(user_groups, metadata_filters, **kwargs):
+def get_metadata_filters(user_groups, classification, **kwargs):
     logger.info(f"user_groups received: {user_groups}")
-    logger.info(f"Evaluating metadata_filters: {metadata_filters}")
+    logger.info(f"Evaluating classification: {classification}")
+    
     for group in user_groups:
         cn = extract_cn(group)
-        for rule in metadata_filters:
-            match_type = rule.get("match_type")
+        for classifications in classification:
+            match_type = classifications.get("match_type")
             if match_type == "startswith":
-                prefix = rule.get("group_prefix")
+                prefix = classifications.get("group_prefix")
                 if prefix and cn.startswith(prefix):
-                    value = rule.get("value")
-                    classification = value[-1] if isinstance(value, list) and value else value
-                    logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning classification: {classification}")
-                    return {"metadata": {"classification": classification}}
+                    logger.info(f"Extracted CN '{cn}' matches prefix '{prefix}'. Returning metadata.")
+                    # Convert list values into separate dictionary keys
+                    metadata = {"classification": classifications["value"][0]}
+                    if len(classifications["value"]) > 1:
+                        metadata["confidential"] = classifications["value"][1]
+                    return metadata
             elif match_type == "exact":
-                name = rule.get("group_name")
+                name = classifications.get("group_name")
                 if name and cn == name:
-                    value = rule.get("value")
-                    classification = value[-1] if isinstance(value, list) and value else value
-                    logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning classification: {classification}")
-                    return {"metadata": {"classification": classification}}
-    logger.info("No matching group found. Returning None.")
+                    logger.info(f"Extracted CN '{cn}' matches exact name '{name}'. Returning metadata.")
+                    metadata = {"classification": classifications["value"][0]}
+                    if len(classifications["value"]) > 1:
+                        metadata["confidential"] = classifications["value"][1]
+                    return metadata
+    
+    logger.info("No matching group found for classification rules. Returning None.")
     return None
-
 
 =============
 
