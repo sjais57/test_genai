@@ -64,3 +64,68 @@ def get_user_category(user_groups: List[str], lookup_mode: str = 'FIRST_MATCH', 
     else:
         logger.warning(f"Unknown lookup_mode: {lookup_mode}")
         return {"category": None, "match_mode": lookup_mode, "reason": "Unknown lookup_mode"}
+
+
+
+============================
+
+import logging
+from typing import List, Dict, Any, Optional
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def get_user_category(
+    user_groups: Optional[List[str]], 
+    lookup_mode: str = 'FIRST_MATCH', 
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Assign user to a category based on group membership and lookup mode.
+
+    Args:
+        user_groups: List of groups the user belongs to.
+        lookup_mode: 'FIRST_MATCH', 'ALL_MATCHES', or 'TIERED_MATCH'.
+        metadata: (kwarg) metadata dictionary containing 'categories'.
+
+    Returns:
+        For FIRST_MATCH: {'category': <category_dict or None>, ...}
+        For ALL_MATCHES: {'categories': [<category_dict>], ...}
+        For TIERED_MATCH: {'category': <highest_tier_category or None>, ...}
+    """
+    logger.info(f"Assigning user category for groups: {user_groups} with mode: {lookup_mode}")
+    metadata = kwargs.get('metadata', {})
+    if not metadata:
+        logger.warning("No metadata provided")
+        return {"category": None, "match_mode": lookup_mode, "reason": "No metadata provided"}
+
+    categories = metadata.get('categories', {})
+    if not categories:
+        logger.warning("No categories found in metadata")
+        return {"category": None, "match_mode": lookup_mode, "reason": "No categories in metadata"}
+
+    user_groups = user_groups or []  # handle None
+
+    matches = [
+        {"name": cat_name, **cat_data}
+        for cat_name, cat_data in categories.items()
+        if any(g in user_groups for g in cat_data.get('groups', []))
+    ]
+
+    if lookup_mode == 'FIRST_MATCH':
+        match = matches[0] if matches else None
+        logger.info(f"FIRST_MATCH assigned: {match}")
+        return {"category": match, "match_mode": lookup_mode, "reason": None if match else "No match"}
+    
+    if lookup_mode == 'ALL_MATCHES':
+        logger.info(f"ALL_MATCHES found: {matches}")
+        return {"categories": matches, "match_mode": lookup_mode, "reason": None if matches else "No match"}
+    
+    if lookup_mode == 'TIERED_MATCH':
+        match = max(matches, key=lambda x: x.get('tier', 0)) if matches else None
+        logger.info(f"TIERED_MATCH assigned: {match}")
+        return {"category": match, "match_mode": lookup_mode, "reason": None if match else "No match"}
+
+    logger.warning(f"Unknown lookup_mode: {lookup_mode}")
+    return {"category": None, "match_mode": lookup_mode, "reason": "Unknown lookup_mode"}
+
