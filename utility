@@ -3,12 +3,13 @@
 set -e
 
 SCRIPT_NAME="script"
+BASE_DIR="/workspace/envs"
 
 usage() {
 cat << EOF
 Usage: $SCRIPT_NAME [OPTIONS]
 
-Creates a Python virtual environment in /workspace/\$USER/envs and registers it as a Jupyter kernel.
+Creates a Python virtual environment in $BASE_DIR and registers it as a Jupyter kernel.
 
 Options:
   --pvt [VENV_NAME]   Create a Python virtual environment named VENV_NAME.
@@ -23,7 +24,7 @@ Examples:
 EOF
 }
 
-# No arguments or help
+# Show help if no args or help flag
 if [[ $# -eq 0 ]] || [[ "$1" == "-h" || "$1" == "--help" ]]; then
     usage
     exit 0
@@ -45,11 +46,10 @@ else
     exit 1
 fi
 
-BASE_DIR="/workspace/$USER"
-VENV_PATH="$BASE_DIR/envs/$VENV_NAME"
+VENV_PATH="$BASE_DIR/$VENV_NAME"
 
-# Create base/envs directory if it doesn't exist
-mkdir -p "$BASE_DIR/envs"
+# Create base directory if it doesn't exist
+mkdir -p "$BASE_DIR"
 
 # Check if virtual environment already exists
 if [ -d "$VENV_PATH" ]; then
