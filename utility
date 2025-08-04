@@ -2,48 +2,46 @@
 
 set -e
 
-# Usage/help message
+SCRIPT_NAME="script"
+
 usage() {
 cat << EOF
-Usage: $(basename "$0") [OPTIONS] [VENV_NAME]
+Usage: $SCRIPT_NAME [OPTIONS]
 
 Creates a Python virtual environment in /workspace/\$USER and registers it as a Jupyter kernel.
 
 Options:
+  --pvt VENV_NAME   Create a Python virtual environment named VENV_NAME.
   -h, --help        Show this help message and exit.
 
-Arguments:
-  VENV_NAME         Name of the virtual environment to create.
-                    If not provided, you will be prompted.
-
 Examples:
-  $(basename "$0") myenv
-  $(basename "$0")
-  $(basename "$0") --help
+  $SCRIPT_NAME --pvt myenv
+  $SCRIPT_NAME --help
 
 EOF
 }
 
-# Argument parsing
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+# No arguments or help
+if [[ $# -eq 0 ]] || [[ "$1" == "-h" || "$1" == "--help" ]]; then
     usage
     exit 0
 fi
 
-# Set base directory
-BASE_DIR="/workspace/$USER"
-
-# Prompt or use argument for venv name
-if [ -z "$1" ]; then
-  read -p "Enter the name of the Python virtual environment: " VENV_NAME
-  if [ -z "$VENV_NAME" ]; then
-    echo "Virtual environment name cannot be empty."
-    exit 1
-  fi
+# Handle --pvt argument
+if [[ "$1" == "--pvt" ]]; then
+    if [[ -z "$2" ]]; then
+        echo "Error: You must provide a virtual environment name after --pvt."
+        echo
+        usage
+        exit 1
+    fi
+    VENV_NAME="$2"
 else
-  VENV_NAME="$1"
+    usage
+    exit 1
 fi
 
+BASE_DIR="/workspace/$USER"
 VENV_PATH="$BASE_DIR/$VENV_NAME"
 
 # Create base directory if it doesn't exist
