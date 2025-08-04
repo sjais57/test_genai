@@ -8,14 +8,16 @@ usage() {
 cat << EOF
 Usage: $SCRIPT_NAME [OPTIONS]
 
-Creates a Python virtual environment in /workspace/\$USER and registers it as a Jupyter kernel.
+Creates a Python virtual environment in /workspace/\$USER/envs and registers it as a Jupyter kernel.
 
 Options:
-  --pvt VENV_NAME   Create a Python virtual environment named VENV_NAME.
-  -h, --help        Show this help message and exit.
+  --pvt [VENV_NAME]   Create a Python virtual environment named VENV_NAME.
+                      If VENV_NAME is not provided, you will be prompted.
+  -h, --help          Show this help message and exit.
 
 Examples:
   $SCRIPT_NAME --pvt myenv
+  $SCRIPT_NAME --pvt
   $SCRIPT_NAME --help
 
 EOF
@@ -30,22 +32,24 @@ fi
 # Handle --pvt argument
 if [[ "$1" == "--pvt" ]]; then
     if [[ -z "$2" ]]; then
-        echo "Error: You must provide a virtual environment name after --pvt."
-        echo
-        usage
-        exit 1
+        read -p "Enter the name of the Python virtual environment: " VENV_NAME
+        if [ -z "$VENV_NAME" ]; then
+            echo "Virtual environment name cannot be empty."
+            exit 1
+        fi
+    else
+        VENV_NAME="$2"
     fi
-    VENV_NAME="$2"
 else
     usage
     exit 1
 fi
 
 BASE_DIR="/workspace/$USER"
-VENV_PATH="$BASE_DIR/$VENV_NAME"
+VENV_PATH="$BASE_DIR/envs/$VENV_NAME"
 
-# Create base directory if it doesn't exist
-mkdir -p "$BASE_DIR"
+# Create base/envs directory if it doesn't exist
+mkdir -p "$BASE_DIR/envs"
 
 # Check if virtual environment already exists
 if [ -d "$VENV_PATH" ]; then
