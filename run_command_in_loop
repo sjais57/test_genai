@@ -1,16 +1,31 @@
 #!/bin/bash
 
-LOCAL_FILE="/path/to/local/file.txt"
-HDFS_PATH="/user/youruser/data/file.txt"
+command1="curl http://example.com/first"
+command2="curl http://example.com/second"
+command3="curl http://example.com/third"
+
+commands=( "$command1" "$command2" "$command3" )
 
 while true; do
-    echo "[$(date)] Copying $LOCAL_FILE to HDFS at $HDFS_PATH ..."
-    hdfs dfs -copyFromLocal -f "$LOCAL_FILE" "$HDFS_PATH"
-    if [ $? -eq 0 ]; then
-        echo "[$(date)] File copied successfully!"
-    else
-        echo "[$(date)] Failed to copy file!"
-    fi
-    echo "Sleeping for 10 minutes before next copy..."
-    sleep 600   # 10 minutes
+    for i in "${!commands[@]}"; do
+        cmd_var="command$((i+1))"
+        echo "-------------------------------"
+        echo "[$(date)] Running $cmd_var now..."
+        eval "${!cmd_var}"
+        if [ $? -eq 0 ]; then
+            echo "[$(date)] $cmd_var ran successfully!"
+        else
+            echo "[$(date)] $cmd_var failed to run!"
+        fi
+        if [ "$i" -lt "$((${#commands[@]} - 1))" ]; then
+            # Random wait between 1 and 600 seconds
+            rand_sleep=$((RANDOM % 600 + 1))
+            echo "Waiting $rand_sleep seconds (~$((rand_sleep / 60)) min) before next command..."
+            sleep $rand_sleep
+        fi
+    done
+    # Random wait before next loop
+    rand_sleep=$((RANDOM % 600 + 1))
+    echo "All commands finished, waiting $rand_sleep seconds (~$((rand_sleep / 60)) min) before starting next loop..."
+    sleep $rand_sleep
 done
