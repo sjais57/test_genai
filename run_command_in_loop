@@ -1,0 +1,21 @@
+#!/bin/bash
+
+commands=(
+    "curl http://example.com/first"
+    "curl http://example.com/second"
+    "curl http://example.com/third"
+)
+
+while true; do
+    for i in "${!commands[@]}"; do
+        cmd="${commands[$i]}"
+        echo "[$(date)] Running: $cmd"
+        eval $cmd
+        if [ "$i" -lt "$((${#commands[@]} - 1))" ]; then
+            echo "Waiting 5 minutes before next..."
+            sleep 300  # 5 minutes
+        fi
+    done
+    echo "All commands in the list finished. Looping again after 5 minutes..."
+    sleep 300  # Wait 5 minutes before starting over
+done
