@@ -1,21 +1,27 @@
 #!/bin/bash
 
-commands=(
-    "curl http://example.com/first"
-    "curl http://example.com/second"
-    "curl http://example.com/third"
-)
+command1="curl http://example.com/first"
+command2="curl http://example.com/second"
+command3="curl http://example.com/third"
+
+commands=( "$command1" "$command2" "$command3" )
 
 while true; do
     for i in "${!commands[@]}"; do
-        cmd="${commands[$i]}"
-        echo "[$(date)] Running: $cmd"
-        eval $cmd
+        cmd_var="command$((i+1))"
+        echo "-------------------------------"
+        echo "[$(date)] Running $cmd_var now..."
+        eval "${!cmd_var}"
+        if [ $? -eq 0 ]; then
+            echo "[$(date)] $cmd_var ran successfully!"
+        else
+            echo "[$(date)] $cmd_var failed to run!"
+        fi
         if [ "$i" -lt "$((${#commands[@]} - 1))" ]; then
-            echo "Waiting 5 minutes before next..."
-            sleep 300  # 5 minutes
+            echo "Waiting 5 minutes before next command..."
+            sleep 300
         fi
     done
-    echo "All commands in the list finished. Looping again after 5 minutes..."
-    sleep 300  # Wait 5 minutes before starting over
+    echo "All commands finished, waiting 5 minutes before starting next loop..."
+    sleep 300
 done
