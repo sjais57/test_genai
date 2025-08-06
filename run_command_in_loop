@@ -1,27 +1,16 @@
 #!/bin/bash
 
-command1="curl http://example.com/first"
-command2="curl http://example.com/second"
-command3="curl http://example.com/third"
-
-commands=( "$command1" "$command2" "$command3" )
+LOCAL_FILE="/path/to/local/file.txt"
+HDFS_PATH="/user/youruser/data/file.txt"
 
 while true; do
-    for i in "${!commands[@]}"; do
-        cmd_var="command$((i+1))"
-        echo "-------------------------------"
-        echo "[$(date)] Running $cmd_var now..."
-        eval "${!cmd_var}"
-        if [ $? -eq 0 ]; then
-            echo "[$(date)] $cmd_var ran successfully!"
-        else
-            echo "[$(date)] $cmd_var failed to run!"
-        fi
-        if [ "$i" -lt "$((${#commands[@]} - 1))" ]; then
-            echo "Waiting 5 minutes before next command..."
-            sleep 300
-        fi
-    done
-    echo "All commands finished, waiting 5 minutes before starting next loop..."
-    sleep 300
+    echo "[$(date)] Copying $LOCAL_FILE to HDFS at $HDFS_PATH ..."
+    hdfs dfs -copyFromLocal -f "$LOCAL_FILE" "$HDFS_PATH"
+    if [ $? -eq 0 ]; then
+        echo "[$(date)] File copied successfully!"
+    else
+        echo "[$(date)] Failed to copy file!"
+    fi
+    echo "Sleeping for 10 minutes before next copy..."
+    sleep 600   # 10 minutes
 done
