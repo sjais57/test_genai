@@ -1,3 +1,25 @@
+opa_policy: |
+  package user.metadata
+
+  # ... (previous rules remain) ...
+
+  # Get team permissions
+  team_permissions = permissions {
+      input.team_id != ""
+      permissions := metadata.team_permissions[input.team_id]
+  }
+
+  # Full user context combining category and permissions
+  user_context = context {
+      context := {
+          "category": category_metadata,
+          "permissions": team_permissions,
+          "organization": metadata.context.organization_id,
+          "region": metadata.context.deployment_region
+      }
+  }
+
+
 # ak_tiered_model_exec.yaml.txt
 claims:
   # ... (your existing claims section remains unchanged) ...
