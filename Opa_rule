@@ -1,0 +1,178 @@
+# api_key_1.yaml
+api_key: "ak_123_enterprise"
+metadata:
+  owner: "user1@company.com"
+  tier: "enterprise"
+  groups: ["grp_tier1", "admin"]
+  team: "ai-team"
+  
+access_rules:
+  models:
+    - "gpt-4"
+    - "claude-2"
+  rate_limit: 500
+  allowed_endpoints:
+    - "/v1/chat/completions"
+    - "/v1/embeddings"
+
+opa_policy: |
+  package api_key.authz
+  
+  default allow = false
+  
+  # Model access check
+  allow_model(model) {
+      model == input.access_rules.models[_]
+  }
+  
+  # Endpoint access check
+  allow_endpoint(endpoint) {
+      endpoint == input.access_rules.allowed_endpoints[_]
+  }
+  
+  # Tier-based feature flags
+  can_use_advanced_features {
+      input.metadata.tier == "enterprise"
+  }
+  
+  # Team permission inheritance
+  team_permissions = permissions {
+      permissions := input.metadata.team_permissions[input.metadata.team]
+  }
+
+
+
+import glob
+import yaml
+import json
+from pathlib import Path
+
+class APIKeyManager:
+    def __init__(self, keys_dir="api_keys"):
+        self.keys_dir = Path(keys_dir)
+        self.api_keys = self._load_all_keys()
+        
+    def _load_all_keys(self):
+        """Load all YAML files from the directory"""
+        keys = {}
+        for yaml_file in self.keys_dir.glob("*.yaml"):
+            with open(yaml_file) as f:
+                key_data = yaml.safe_load(f)
+                keys[key_data['api_key']] = key_data
+        return keys
+    
+    def evaluate_request(self, api_key, request):
+        """
+        Evaluate a request against the API key's OPA policy
+        
+        Args:
+            api_key: The API key string
+            request: Dict containing request details (model, endpoint, etc.)
+        
+        Returns:
+            Tuple of (allowed: bool, reasons: list, metadata: dict)
+        """
+        if api_key not in self.api_keys:
+            return False, ["invalid_api_key"], {}
+            
+        key_data = self.api_keys[api_key]
+        
+        # Prepare OPA input
+        opa_input = {
+            "input": {
+                "metadata": key_data.get("metadata", {}),
+                "access_rules": key_data.get("access_rules", {}),
+                "request": request
+            }
+        }
+        
+        # Evaluate policy (using actual OPA or a Python implementation)
+        result = self._evaluate_opa(key_data['opa_policy'], opa_input)
+        
+        return (
+            result.get("allow", False),
+            result.get("reasons", []),
+            result.get("metadata", {})
+        )
+    
+    def _evaluate_opa(self, policy, input_data):
+        """Evaluate OPA policy (simplified Python implementation)"""
+        # In production, you'd call the actual OPA engine
+        # This is a simplified version for demonstration
+        
+        # Your actual OPA evaluation logic would go here
+        # For now just return a mock response
+        return {
+            "allow": True,
+            "reasons": ["model_allowed", "endpoint_permitted"],
+            "metadata": {
+                "tier": input_data["input"]["metadata"].get("tier"),
+                "rate_limit": input_data["input"]["access_rules"].get("rate_limit")
+            }
+        }
+
+
+
+# Initialize the manager
+manager = APIKeyManager(keys_dir="path/to/api_keys")
+
+# Sample request
+request = {
+    "model": "gpt-4",
+    "endpoint": "/v1/chat/completions",
+    "user_groups": ["grp_tier1"]
+}
+
+# Evaluate a request
+api_key = "ak_123_enterprise"
+allowed, reasons, metadata = manager.evaluate_request(api_key, request)
+
+print(f"Allowed: {allowed}")
+print(f"Reasons: {reasons}")
+print(f"Metadata: {metadata}")
+
+
+
+
+
+
+dynamics
+
+opa_policy: |
+  package api_key.authz
+  
+  # Default deny
+  default allow = false
+  
+  # Allow if all checks pass
+  allow {
+      allow_model(input.request.model)
+      allow_endpoint(input.request.endpoint)
+      allow_user_group
+      under_rate_limit
+  }
+  
+  # Model access
+  allow_model(model) {
+      model == input.access_rules.models[_]
+  }
+  
+  # Endpoint access
+  allow_endpoint(endpoint) {
+      endpoint == input.access_rules.allowed_endpoints[_]
+  }
+  
+  # Group access
+  allow_user_group {
+      input.request.user_groups[_] == input.metadata.groups[_]
+  }
+  
+  # Rate limiting (simplified)
+  under_rate_limit {
+      input.metadata.tier == "enterprise"
+  }
+  
+  under_rate_limit {
+      input.metadata.tier != "enterprise"
+      input.request.current_usage < input.access_rules.rate_limit
+  }
