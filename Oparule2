@@ -1,0 +1,49 @@
+opa_policy: |
+  package user.metadata
+  
+  default category_metadata = {"tier": 0}
+  
+  category_metadata = metadata {
+      some category
+      input.groups[_] == input.metadata.categories[category].groups[_]
+      metadata := {
+          "tier": input.metadata.categories[category].tier,
+          "category": category
+      }
+  }
+  
+  team_permissions = permissions {
+      input.team_id != ""
+      permissions := input.metadata.team_permissions[input.team_id]
+  }
+  
+  user_context = {
+      "category": category_metadata,
+      "permissions": team_permissions,
+      "organization": input.metadata.context.organization_id
+  }
+
+
+
+
+
+{
+  "groups": ["grp_tier1"],
+  "team_id": "ai-team",
+  "metadata": {
+    "categories": {
+      "gold": {
+        "groups": ["grp_tier1"],
+        "tier": 3
+      }
+    },
+    "team_permissions": {
+      "ai-team": {
+        "can_manage": false
+      }
+    },
+    "context": {
+      "organization_id": "org-12345"
+    }
+  }
+}
