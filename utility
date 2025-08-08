@@ -1,3 +1,35 @@
+# ak_tiered_model_exec.yaml.txt
+claims:
+  # ... (your existing claims section remains unchanged) ...
+
+metadata:
+  # ... (your existing metadata remains unchanged until the end) ...
+
+# Embedded OPA Policy Section
+opa_policy: |
+  package user.metadata
+
+  # Default output if no category matches
+  default category_metadata = {"tier": 0, "destURL": "debug/request-info?user_category=default"}
+
+  # Find matching category for user groups
+  category_metadata = metadata {
+      some category
+      input.groups_set[_] == metadata.categories[category].groups[_]
+      metadata := {
+          "tier": metadata.categories[category].tier,
+          "destURL": metadata.categories[category].destURL,
+          "category": category
+      }
+  }
+
+  # Helper rule to convert groups list to a set for easier comparison
+  groups_set[group] {
+      group := input.groups[_]
+  }
+
+
+
 #!/bin/bash
 
 set -e
