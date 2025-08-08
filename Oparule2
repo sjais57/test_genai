@@ -1,21 +1,29 @@
-# ak_tiered_model_exec.yaml
+
+# evaluation.yaml
 policy: |
   package user.metadata
-
+  
   default allow = false
-
+  
   allow {
-      # Your policy rules here
       input.metadata.tier == "enterprise"
       input.groups[_] == "grp_tier1"
   }
-
+  
   user_context = {
       "tier": input.metadata.tier,
       "groups": input.groups,
       "permissions": input.metadata.permissions
   }
 
+input:
+  metadata:
+    tier: "enterprise"
+    permissions:
+      can_manage: true
+  groups:
+    - "grp_tier1"
+    - "admin"
 metadata:
   # Your metadata here
   tier: "enterprise"
