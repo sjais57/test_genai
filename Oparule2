@@ -1,31 +1,28 @@
-opa_policy: |
+# ak_tiered_model_exec.yaml
+policy: |
   package user.metadata
-  
-  default category_metadata = {"tier": 0}
-  
-  category_metadata = metadata {
-      some category
-      input.groups[_] == input.metadata.categories[category].groups[_]
-      metadata := {
-          "tier": input.metadata.categories[category].tier,
-          "category": category
-      }
+
+  default allow = false
+
+  allow {
+      # Your policy rules here
+      input.metadata.tier == "enterprise"
+      input.groups[_] == "grp_tier1"
   }
-  
-  team_permissions = permissions {
-      input.team_id != ""
-      permissions := input.metadata.team_permissions[input.team_id]
-  }
-  
+
   user_context = {
-      "category": category_metadata,
-      "permissions": team_permissions,
-      "organization": input.metadata.context.organization_id
+      "tier": input.metadata.tier,
+      "groups": input.groups,
+      "permissions": input.metadata.permissions
   }
 
-
-
-
+metadata:
+  # Your metadata here
+  tier: "enterprise"
+  groups: ["grp_tier1", "admin"]
+  permissions:
+    can_manage: true
+    can_create: false
 
 {
   "groups": ["grp_tier1"],
