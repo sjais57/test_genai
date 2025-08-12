@@ -1,87 +1,65 @@
-package ak_tiered_model_exec
+# policy.rego
+package meta.eval
 
-# Default deny for all requests
-default allow = false
+# Default when nothing matches
+default fallback := ["public"]
 
-# Main authorization rule
-allow {
-    # Check if user's group matches any category
-    user_category := get_user_category(input.user_groups)
-    user_category != ""
+# Convenience: sorted unique
+sorted_uniq(xs) := array.sort(array.fromset(xs))
 
-    # Check if requested model is allowed
-    valid_model(input.model)
-
-    # Check rate limits
-    within_rate_limit
+# Helpers
+any_exact_match(groups, m) {
+  m.match_type == "exact"
+  g := m.groups[_]
+  groups[_] == g
 }
 
-# Get user category based on groups
-get_user_category(groups) = category {
-    some category_name, category_data in input.metadata.categories
-    some group in groups
-    group in category_data.groups
-    category = category_name
-} else = "" {
-    true
+any_prefix_match(groups, m) {
+  m.match_type == "startswith"
+  gp := m.groups_prefix[_]
+  some g
+  groups[_] == g
+  startswith(g, gp)
 }
 
-# Check if model is allowed
-valid_model(model) {
-    model == input.claims.static.models[_]
+# Collect all classifications that match any user group
+classifications[c] {
+  m := data.metadata.metadata_filter[_]
+  any_exact_match(input.user_groups, m)  # exact match
+  c := m.classification[_]
+}
+classifications[c] {
+  m := data.metadata.metadata_filter[_]
+  any_prefix_match(input.user_groups, m) # startswith match
+  c := m.classification[_]
 }
 
-# Check rate limiting
-within_rate_limit {
-    input.claims.static.rate_limit > count(requests)
+# Final shape you asked for
+metadata_filter := {"classification": classes} {
+  classes := sorted_uniq([c | c := classifications[_]])
 }
 
-# Get team permissions
-get_team_permissions(team_id) = permissions {
-    permissions := input.metadata.team_permissions[team_id]
-}
+# Optional: expose just the list as well
+classes := sorted_uniq([c | c := classifications[_]])
 
-# Get destination URL based on user category
-get_destination_url(user_groups) = url {
-    category := get_user_category(user_groups)
-    url := input.metadata.categories[category].destURL
-}
 
-# Get allowed domains
-allowed_domains = domains {
-    domains := input.metadata.request_data.allowed_domains
-}
 
-# Get model configuration
-get_model_config = config {
-    config := input.metadata.function_params.model_config.default_params
-}
+# rules.yaml
+metadata:
+  metadata_filter:
+    - match_type: "startswith"
+      groups_prefix: ["grp_tier1_", "unix_"]
+      classification: ["confidential", "proprietary"]
+    - match_type: "exact"
+      groups: ["grp_tier", "contributors"]
+      classification: ["confidential"]
+    - match_type: "exact"
+      groups: ["groups4"]
+      classification: ["internal"]
 
-# Get logging configuration
-get_logging_config = config {
-    config := {
-        "level": input.metadata.function_params.logging.level,
-        "detailed_errors": input.metadata.function_params.logging.detailed_errors
-    }
-}
 
-# Get test scenarios (parsed from JSON string)
-get_test_scenarios = scenarios {
-    scenarios := json.unmarshal(input.metadata.json_data).test_scenarios
-}
-
-# Helper function to check if user has specific permission
-has_permission(team_id, permission) {
-    permissions := get_team_permissions(team_id)
-    permissions[permission] == true
-}
-
-# Get service tier information
-get_service_tier = tier {
-    tier := input.metadata.context.service_tier
-}
-
-# Get deployment region
-get_deployment_region = region {
-    region := input.metadata.context.deployment_region
-}
+opa eval -I \
+  -d policy.rego \
+  -d rules.yaml \
+  -i input.json \
+  'data.meta.eval.metadata_filter' -f pretty
