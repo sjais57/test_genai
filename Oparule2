@@ -58,3 +58,21 @@ classes = out if {
 # final output (with fallback when nothing matches)
 metadata_filter = {"classification": classes} if { count(classes) > 0 }
 metadata_filter = {"classification": fallback} if { count(classes) == 0 }
+
+# Sample input data for testing
+test_input_1 := {
+  "user_groups": ["grp_tier1_eng", "developers"]
+}
+
+test_input_2 := {
+  "user_groups": ["contributors", "reviewers"]
+}
+
+test_input_3 := {
+  "user_groups": ["team_a", "team_b"]
+}
+
+# Test cases
+test_case_1 := metadata_filter with input as test_input_1
+test_case_2 := metadata_filter with input as test_input_2
+test_case_3 := metadata_filter with input as test_input_3
