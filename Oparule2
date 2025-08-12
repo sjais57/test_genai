@@ -2,40 +2,41 @@ package meta.eval
 
 default fallback := ["public"]
 
-# Sorted unique helper
-sorted_uniq(xs) = out {
-    out := array.sort(array.fromset(xs))
+# helper: sorted unique
+sorted_uniq(xs) := array.sort(array.fromset(xs))
+
+# boolean: does rule m match by exact group?
+exact_match(m, groups) {
+  m.match_type == "exact"
+  mg := m.groups[_]
+  groups[_] == mg
 }
 
-# Boolean rule: does m have an exact group match?
-any_exact_match(groups, m) {
-    m.match_type == "exact"
-    g := m.groups[_]
-    groups[_] == g
+# boolean: does rule m match by prefix?
+prefix_match(m, groups) {
+  m.match_type == "startswith"
+  gp := m.groups_prefix[_]
+  some g
+  groups[_] == g
+  startswith(g, gp)
 }
 
-# Boolean rule: does m have a prefix match?
-any_prefix_match(groups, m) {
-    m.match_type == "startswith"
-    gp := m.groups_prefix[_]
-    some g
-    groups[_] == g
-    startswith(g, gp)
-}
-
-# Collect all classifications for matching rules
+# collect classifications for matches (two bodies = disjunction)
 classifications[c] {
-    m := data.metadata.metadata_filter[_]
-    any_exact_match(input.user_groups, m)
-    c := m.classification[_]
+  m := data.metadata.metadata_filter[_]
+  exact_match(m, input.user_groups)
+  c := m.classification[_]
 }
 classifications[c] {
-    m := data.metadata.metadata_filter[_]
-    any_prefix_match(input.user_groups, m)
-    c := m.classification[_]
+  m := data.metadata.metadata_filter[_]
+  prefix_match(m, input.user_groups)
+  c := m.classification[_]
 }
 
-# Final output
-metadata_filter := {"classification": classes} {
-    classes := sorted_uniq([c | c := classifications[_]])
-}
+# final outputs
+classes := sorted_uniq([c | c := classifications[_]])
+
+metadata_filter := {"classification": classes}
+
+# (optional) fallback if nothing matched:
+# metadata_filter := {"classification": fallback} { count(classes) == 0 }
