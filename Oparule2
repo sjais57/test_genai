@@ -2,18 +2,14 @@ package meta.eval
 
 default fallback := ["public"]
 
-# helper: sorted unique
-sorted_uniq(xs) := array.sort(array.fromset(xs))
-
-# boolean: does rule m match by exact group?
-exact_match(m, groups) {
+# --- match helpers (boolean rules) ---
+exact_match(m, groups) if {
   m.match_type == "exact"
   mg := m.groups[_]
   groups[_] == mg
 }
 
-# boolean: does rule m match by prefix?
-prefix_match(m, groups) {
+prefix_match(m, groups) if {
   m.match_type == "startswith"
   gp := m.groups_prefix[_]
   some g
@@ -21,22 +17,23 @@ prefix_match(m, groups) {
   startswith(g, gp)
 }
 
-# collect classifications for matches (two bodies = disjunction)
-classifications[c] {
+# --- collect matching classifications (partial set, v1 uses `contains`) ---
+classifications contains c if {
   m := data.metadata.metadata_filter[_]
   exact_match(m, input.user_groups)
   c := m.classification[_]
 }
-classifications[c] {
+classifications contains c if {
   m := data.metadata.metadata_filter[_]
   prefix_match(m, input.user_groups)
   c := m.classification[_]
 }
 
-# final outputs
-classes := sorted_uniq([c | c := classifications[_]])
+# unique + sorted list
+classes = out if {
+  out := array.sort(array.fromset([c | classifications contains c]))
+}
 
-metadata_filter := {"classification": classes}
-
-# (optional) fallback if nothing matched:
-# metadata_filter := {"classification": fallback} { count(classes) == 0 }
+# final result (with fallback if nothing matched)
+metadata_filter = {"classification": classes} if { count(classes) > 0 }
+metadata_filter = {"classification": fallback} if { count(classes) == 0 }
