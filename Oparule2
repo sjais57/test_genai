@@ -1,65 +1,41 @@
-# policy.rego
 package meta.eval
 
-# Default when nothing matches
 default fallback := ["public"]
 
-# Convenience: sorted unique
-sorted_uniq(xs) := array.sort(array.fromset(xs))
+# Sorted unique helper
+sorted_uniq(xs) = out {
+    out := array.sort(array.fromset(xs))
+}
 
-# Helpers
+# Boolean rule: does m have an exact group match?
 any_exact_match(groups, m) {
-  m.match_type == "exact"
-  g := m.groups[_]
-  groups[_] == g
+    m.match_type == "exact"
+    g := m.groups[_]
+    groups[_] == g
 }
 
+# Boolean rule: does m have a prefix match?
 any_prefix_match(groups, m) {
-  m.match_type == "startswith"
-  gp := m.groups_prefix[_]
-  some g
-  groups[_] == g
-  startswith(g, gp)
+    m.match_type == "startswith"
+    gp := m.groups_prefix[_]
+    some g
+    groups[_] == g
+    startswith(g, gp)
 }
 
-# Collect all classifications that match any user group
+# Collect all classifications for matching rules
 classifications[c] {
-  m := data.metadata.metadata_filter[_]
-  any_exact_match(input.user_groups, m)  # exact match
-  c := m.classification[_]
+    m := data.metadata.metadata_filter[_]
+    any_exact_match(input.user_groups, m)
+    c := m.classification[_]
 }
 classifications[c] {
-  m := data.metadata.metadata_filter[_]
-  any_prefix_match(input.user_groups, m) # startswith match
-  c := m.classification[_]
+    m := data.metadata.metadata_filter[_]
+    any_prefix_match(input.user_groups, m)
+    c := m.classification[_]
 }
 
-# Final shape you asked for
+# Final output
 metadata_filter := {"classification": classes} {
-  classes := sorted_uniq([c | c := classifications[_]])
+    classes := sorted_uniq([c | c := classifications[_]])
 }
-
-# Optional: expose just the list as well
-classes := sorted_uniq([c | c := classifications[_]])
-
-
-
-# rules.yaml
-metadata:
-  metadata_filter:
-    - match_type: "startswith"
-      groups_prefix: ["grp_tier1_", "unix_"]
-      classification: ["confidential", "proprietary"]
-    - match_type: "exact"
-      groups: ["grp_tier", "contributors"]
-      classification: ["confidential"]
-    - match_type: "exact"
-      groups: ["groups4"]
-      classification: ["internal"]
-
-
-opa eval -I \
-  -d policy.rego \
-  -d rules.yaml \
-  -i input.json \
-  'data.meta.eval.metadata_filter' -f pretty
