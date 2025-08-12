@@ -1,78 +1,33 @@
 package meta.eval
 
-default fallback := ["public"]
+# ---- Hardcoded rules table (edit as needed) ----
+rules := [
+  {"type": "startswith", "prefixes": ["grp_tier1_", "unix_"], "cls": ["confidential", "proprietary"]},
+  {"type": "exact",      "groups":   ["grp_tier", "contributors"], "cls": ["confidential"]},
+  {"type": "exact",      "groups":   ["groups4"],                   "cls": ["internal"]}
+]
 
-# --- rules table embedded in the policy (no YAML) ---
-rules = [
-  {
-    "match_type": "startswith",
-    "groups_prefix": ["grp_tier1_", "unix_"],
-    "classification": ["confidential", "proprietary"]
-  },
-  {
-    "match_type": "exact",
-    "groups": ["grp_tier", "contributors"],
-    "classification": ["confidential"]
-  },
-  {
-    "match_type": "exact",
-    "groups": ["groups4"],
-    "classification": ["internal"]
-  }
-] if { true }
-
-# --- helpers ---
-# exact group match?
-exact_match(m, groups) if {
-  m.match_type == "exact"
-  mg := m.groups[_]
-  groups[_] == mg
+# ---- Collect matching classifications (partial set uses `contains`) ----
+match_classes contains c if {
+  r := rules[_]
+  r.type == "exact"
+  g := r.groups[_]
+  input.user_groups[_] == g
+  c := r.cls[_]
 }
-
-# prefix match?
-prefix_match(m, groups) if {
-  m.match_type == "startswith"
-  gp := m.groups_prefix[_]
+match_classes contains c if {
+  r := rules[_]
+  r.type == "startswith"
+  p := r.prefixes[_]
   some g
-  groups[_] == g
-  startswith(g, gp)
+  input.user_groups[_] == g
+  startswith(g, p)
+  c := r.cls[_]
 }
 
-# collect matching classifications (partial set uses `contains` in v1)
-classifications contains c if {
-  m := rules[_]
-  exact_match(m, input.user_groups)
-  c := m.classification[_]
-}
-classifications contains c if {
-  m := rules[_]
-  prefix_match(m, input.user_groups)
-  c := m.classification[_]
-}
+# ---- Sorted, unique list from the set ----
+classes := array.sort(array.fromset([c | match_classes contains c]))
 
-# unique + sorted list
-classes = out if {
-  out := array.sort(array.fromset([c | classifications contains c]))
-}
-
-# final output (with fallback when nothing matches)
-metadata_filter = {"classification": classes} if { count(classes) > 0 }
-metadata_filter = {"classification": fallback} if { count(classes) == 0 }
-
-# Sample input data for testing
-test_input_1 := {
-  "user_groups": ["grp_tier1_eng", "developers"]
-}
-
-test_input_2 := {
-  "user_groups": ["contributors", "reviewers"]
-}
-
-test_input_3 := {
-  "user_groups": ["team_a", "team_b"]
-}
-
-# Test cases
-test_case_1 := metadata_filter with input as test_input_1
-test_case_2 := metadata_filter with input as test_input_2
-test_case_3 := metadata_filter with input as test_input_3
+# ---- Final output with fallback ----
+metadata_filter := {"classification": classes} if { count(classes) > 0 }
+metadata_filter := {"classification": ["public"]} if { count(classes) == 0 }
