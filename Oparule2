@@ -2,14 +2,34 @@ package meta.eval
 
 default fallback := ["public"]
 
-# --- match helpers (boolean rules) ---
+# --- rules table embedded in the policy (no YAML) ---
+rules = [
+  {
+    "match_type": "startswith",
+    "groups_prefix": ["grp_tier1_", "unix_"],
+    "classification": ["confidential", "proprietary"]
+  },
+  {
+    "match_type": "exact",
+    "groups": ["grp_tier", "contributors"],
+    "classification": ["confidential"]
+  },
+  {
+    "match_type": "exact",
+    "groups": ["groups4"],
+    "classification": ["internal"]
+  }
+] if { true }
+
+# --- helpers ---
+# exact group match?
 exact_match(m, groups) if {
   m.match_type == "exact"
   mg := m.groups[_]
   groups[_] == mg
 }
 
-
+# prefix match?
 prefix_match(m, groups) if {
   m.match_type == "startswith"
   gp := m.groups_prefix[_]
@@ -18,14 +38,14 @@ prefix_match(m, groups) if {
   startswith(g, gp)
 }
 
-# --- collect matching classifications (partial set, v1 uses `contains`) ---
+# collect matching classifications (partial set uses `contains` in v1)
 classifications contains c if {
-  m := data.metadata.metadata_filter[_]
+  m := rules[_]
   exact_match(m, input.user_groups)
   c := m.classification[_]
 }
 classifications contains c if {
-  m := data.metadata.metadata_filter[_]
+  m := rules[_]
   prefix_match(m, input.user_groups)
   c := m.classification[_]
 }
@@ -35,6 +55,6 @@ classes = out if {
   out := array.sort(array.fromset([c | classifications contains c]))
 }
 
-# final result (with fallback if nothing matched)
+# final output (with fallback when nothing matches)
 metadata_filter = {"classification": classes} if { count(classes) > 0 }
 metadata_filter = {"classification": fallback} if { count(classes) == 0 }
