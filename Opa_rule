@@ -1,8 +1,0 @@
-opa eval -d api.yaml \
-  '[m.classification | m := data.metadata.metadata_filter[_]; m.match_type == "exact"; m.groups[_] == "contributors"]' \
-  -f pretty
-
-
-opa eval -d api.yaml \
-  '[m.classification | m := data.metadata.metadata_filter[_]; m.match_type == "startswith"; gp := m.groups_prefix[_]; startswith("grp_tier1_abc", gp)]' \
-  -f pretty
