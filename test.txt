@@ -1,50 +1,42 @@
-“APISIX Adaptive AI Gateway adds AI-native intelligence to API gateways — enforcing token-based limits, blocking prompt attacks, and auto-scaling inference. It transforms APISIX into the first line of defense and cost control for Generative AI APIs.”
+Option 1 – Business-Oriented (for Senior Managers & Judges from Non-Tech Backgrounds)
 
+Proposed Status:
+We will build an AI-ready Gateway that acts like a guardian + cost manager + traffic controller for AI APIs.
 
-Problem Statement
+Guardian → Stops harmful or manipulative prompts before they reach the AI.
 
-APIs for Generative AI (LLMs) bring new risks and costs that traditional gateways don’t address.
+Cost Manager → Tracks AI usage in words/tokens to keep customers within budget.
 
-Normal rate limits focus on requests, but AI is billed per token → risk of cost blow-ups.
+Traffic Controller → Automatically expands or shrinks servers to handle demand smoothly.
 
-AI models can be manipulated via prompt attacks, which existing WAF rules miss.
+Dashboard → Clear insights into usage, cost, and risks in plain language.
 
-Bursty AI traffic causes slowdowns without dynamic scaling.
+✅ Best for management, investors, or judges who value clarity and outcomes over technical detail.
 
-Limited visibility into who used how many tokens and the true cost per customer.
+🔹 Option 2 – Balanced (Semi-Technical + Business)
 
-Present Status
+Proposed Status:
+We will extend APISIX Gateway with adaptive intelligence to handle Generative AI traffic.
 
-Today’s API Gateways (APISIX, Kong, NGINX) offer:
+Token-Aware Control: Enforce per-customer usage limits at the token level, preventing unexpected billing spikes.
 
-Static rate limiting (requests/sec, not token-aware).
+Prompt Protection: Detect and block malicious prompt patterns (like “ignore your rules”), reducing data leakage risks.
 
-Generic WAF rules (not designed for prompt injection).
+Autoscaling: Connect gateway metrics with autoscaling tools so inference servers scale automatically.
 
-Manual scaling or fixed upstream configs.
+AI Observability: Provide dashboards showing tokens consumed, latency, errors, and costs per tenant.
 
-Logs at request level, not at token or tenant level.
+✅ Best for audiences that include some technical judges but also managers.
 
-Proposed Status
+🔹 Option 3 – Technical (for Expert Judges or Engineers)
 
-Extend APISIX into an Adaptive AI Gateway by adding:
+Proposed Status:
+We propose a Generative AI Gateway Layer on top of APISIX with new pluggable modules:
 
-Token-Aware Rate Limiter (enforce token budgets per tenant).
+Token-Aware Rate Limiter → Counts input/output tokens per request, enforces tenant budgets.
 
-Prompt Security Filter (detect & block risky prompts).
+Prompt Security Filter → Inline OPA/Rego or ML-based detection for prompt injections.
 
-Adaptive Autoscaling (use metrics for real-time scaling).
+Adaptive Autoscaling Loop → Kafka + Prometheus metrics trigger KEDA/HPA for scaling inference pods.
 
-AI-Specific Observability (dashboards for tokens, latency, cost).
-
-Benefits
-
-🔒 Secure → Protects AI APIs from prompt injection attacks.
-
-💸 Cost-Efficient → Prevents unexpected billing spikes via token budgets.
-
-⚡ Reliable → Auto-scales inference pods to handle traffic bursts.
-
-📊 Transparent → Provides insights into usage, cost, and risks per customer.
-
-🚀 Innovative Edge → Positions APISIX as the first AI-native open-source gateway.
+Observability Exporter → Structured metrics for Grafana dashboards (tokens, latency, costs, blocked prompts).
