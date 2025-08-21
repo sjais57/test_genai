@@ -1,1 +1,50 @@
 “APISIX Adaptive AI Gateway adds AI-native intelligence to API gateways — enforcing token-based limits, blocking prompt attacks, and auto-scaling inference. It transforms APISIX into the first line of defense and cost control for Generative AI APIs.”
+
+
+Problem Statement
+
+APIs for Generative AI (LLMs) bring new risks and costs that traditional gateways don’t address.
+
+Normal rate limits focus on requests, but AI is billed per token → risk of cost blow-ups.
+
+AI models can be manipulated via prompt attacks, which existing WAF rules miss.
+
+Bursty AI traffic causes slowdowns without dynamic scaling.
+
+Limited visibility into who used how many tokens and the true cost per customer.
+
+Present Status
+
+Today’s API Gateways (APISIX, Kong, NGINX) offer:
+
+Static rate limiting (requests/sec, not token-aware).
+
+Generic WAF rules (not designed for prompt injection).
+
+Manual scaling or fixed upstream configs.
+
+Logs at request level, not at token or tenant level.
+
+Proposed Status
+
+Extend APISIX into an Adaptive AI Gateway by adding:
+
+Token-Aware Rate Limiter (enforce token budgets per tenant).
+
+Prompt Security Filter (detect & block risky prompts).
+
+Adaptive Autoscaling (use metrics for real-time scaling).
+
+AI-Specific Observability (dashboards for tokens, latency, cost).
+
+Benefits
+
+🔒 Secure → Protects AI APIs from prompt injection attacks.
+
+💸 Cost-Efficient → Prevents unexpected billing spikes via token budgets.
+
+⚡ Reliable → Auto-scales inference pods to handle traffic bursts.
+
+📊 Transparent → Provides insights into usage, cost, and risks per customer.
+
+🚀 Innovative Edge → Positions APISIX as the first AI-native open-source gateway.
