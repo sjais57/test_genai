@@ -1,47 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
-# --- CONFIG ---
-LOCAL_FILE="/var/log/apisix/myroute.log"     # file-logger path
-HDFS_DIR="/user/harshit/apisix/logs"         # HDFS dir (must exist or will be created)
-ROUTE_SLUG="myroute"                         # used in HDFS filename
-FLUSH_WAIT=2                                 # seconds to let file-logger flush
-LOOP_SLEEP=600                               # 10 minutes between cycles
+# -------- CONFIG --------
+LOCAL_FILE="/var/log/apisix/myroute.log"        # file-logger path on the APISIX host
+HDFS_DIR="/user/harshit/apisix/logs"            # HDFS directory to store logs
+HDFS_PREFIX="hdfs_log"                          # HDFS filename prefix
+FLUSH_WAIT=2                                    # seconds to let file-logger flush
+BASE_SLEEP=600                                  # 10 minutes base sleep
+JITTER_MAX=600                                  # add 0..600 sec random jitter each loop
+CMD_JITTER_MAX=0                                # optional 0..N sec random between each curl
 
-# Your three APISIX calls
+# Your APISIX traffic generators
 commands=(
-  'curl -s -o /dev/null "http://127.0.0.1:9080/route1"'
-  'curl -s -o /dev/null "http://127.0.0.1:9080/route2"'
-  'curl -s -o /dev/null "http://127.0.0.1:9080/route3"'
+  'curl -sS -o /dev/null "http://127.0.0.1:9080/route1"'
+  'curl -sS -o /dev/null "http://127.0.0.1:9080/route2"'
+  'curl -sS -o /dev/null "http://127.0.0.1:9080/route3"'
 )
 
+# -------- PRECHECKS --------
+command -v hdfs >/dev/null 2>&1 || { echo "hdfs CLI not found in PATH"; exit 1; }
+hdfs dfs -mkdir -p "$HDFS_DIR" || true
+hdfs dfs -chmod 755 "$HDFS_DIR" || true
+
+cleanup() {
+  rm -f /tmp/${HDFS_PREFIX}_*.log 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo "[$(date -Is)] starting loop…"
 while true; do
-  # 1) generate logs
+  # 1) hit routes
   for cmd in "${commands[@]}"; do
     echo "[$(date -Is)] $cmd"
     bash -lc "$cmd" || echo "[$(date -Is)] WARN: command failed"
+    (( CMD_JITTER_MAX > 0 )) && sleep $(( RANDOM % (CMD_JITTER_MAX + 1) ))
   done
 
-  # 2) small wait so APISIX file-logger flushes its batch
+  # 2) wait for file-logger to flush its batch
   sleep "$FLUSH_WAIT"
 
-  # 3) snapshot -> truncate -> ship
+  # 3) snapshot -> truncate -> ship directly to timestamped HDFS file
   ts=$(date -u +%Y%m%dT%H%M%SZ)
-  snap="/tmp/${ROUTE_SLUG}_${ts}.log"
+  snap="/tmp/${HDFS_PREFIX}_${ts}.log"
+  hdfs_tmp="${HDFS_DIR}/.${HDFS_PREFIX}_${ts}.log.tmp"
+  hdfs_file="${HDFS_DIR}/${HDFS_PREFIX}_${ts}.log"
 
   if [[ -f "$LOCAL_FILE" ]]; then
-    cp -- "$LOCAL_FILE" "$snap" || true          # snapshot current content
-    : > "$LOCAL_FILE"                            # TRUNCATE so next cycle starts fresh
+    # snapshot current content then truncate local log
+    cp -f -- "$LOCAL_FILE" "$snap" || true
+    : > "$LOCAL_FILE"
   fi
 
   if [[ -s "$snap" ]]; then
-    hdfs dfs -mkdir -p "$HDFS_DIR"
-    hdfs dfs -put -f "$snap" "$HDFS_DIR/${ROUTE_SLUG}_${ts}.log"
-    echo "[$(date -Is)] shipped to hdfs://${HDFS_DIR}/${ROUTE_SLUG}_${ts}.log"
+    # write to hidden temp, then atomic rename so readers only see complete files
+    if hdfs dfs -put -f "$snap" "$hdfs_tmp" && hdfs dfs -mv "$hdfs_tmp" "$hdfs_file"; then
+      hdfs dfs -chmod 644 "$hdfs_file" || true
+      echo "[$(date -Is)] shipped to hdfs://${hdfs_file}"
+      rm -f "$snap"
+    else
+      echo "[$(date -Is)] ERROR: HDFS upload failed; leaving snapshot at $snap"
+    fi
   else
     echo "[$(date -Is)] nothing to ship"
+    rm -f "$snap" 2>/dev/null || true
   fi
-  rm -f "$snap"
 
-  sleep "$LOOP_SLEEP"
+  # 4) sleep ~10 min with jitter
+  sleep $(( BASE_SLEEP + (RANDOM % (JITTER_MAX + 1)) ))
 done
