@@ -3,32 +3,39 @@ set -euo pipefail
 umask 022
 
 # -------- CONFIG --------
-LOCAL_FILE="/var/log/apisix/myroute.log"        # file-logger path on the APISIX host
-HDFS_DIR="/user/harshit/apisix/logs"            # HDFS directory to store logs
-HDFS_PREFIX="hdfs_log"                          # HDFS filename prefix
-FLUSH_WAIT=2                                    # seconds to let file-logger flush
-BASE_SLEEP=600                                  # 10 minutes base sleep
-JITTER_MAX=600                                  # add 0..600 sec random jitter each loop
-CMD_JITTER_MAX=0                                # optional 0..N sec random between each curl
+LOCAL_FILE="/var/log/apisix/myroute.log"     # file-logger path on the APISIX host
+HDFS_DIR="/user/harshit/apisix/logs"         # HDFS directory to store logs
+HDFS_PREFIX="hdfs_log"                       # HDFS filename prefix
+FLUSH_WAIT=2                                 # seconds to let file-logger flush
+BASE_SLEEP=600                               # 10 minutes base sleep
+JITTER_MAX=600                               # add 0..600 sec random jitter each loop
+CMD_JITTER_MAX=0                             # optional 0..N sec random between each curl
+
+# Absolute paths (helps under nohup/systemd)
+HDFS_BIN="$(command -v hdfs || true)"
+CURL_BIN="$(command -v curl || true)"
+: "${HDFS_BIN:?hdfs CLI not found in PATH}"
+: "${CURL_BIN:?curl not found in PATH}"
 
 # Your APISIX traffic generators
 commands=(
-  'curl -sS -o /dev/null "http://127.0.0.1:9080/route1"'
-  'curl -sS -o /dev/null "http://127.0.0.1:9080/route2"'
-  'curl -sS -o /dev/null "http://127.0.0.1:9080/route3"'
+  "$CURL_BIN -sS -o /dev/null http://127.0.0.1:9080/route1"
+  "$CURL_BIN -sS -o /dev/null http://127.0.0.1:9080/route2"
+  "$CURL_BIN -sS -o /dev/null http://127.0.0.1:9080/route3"
 )
 
 # -------- PRECHECKS --------
-command -v hdfs >/dev/null 2>&1 || { echo "hdfs CLI not found in PATH"; exit 1; }
-hdfs dfs -mkdir -p "$HDFS_DIR" || true
-hdfs dfs -chmod 755 "$HDFS_DIR" || true
+# Ensure local file exists and is writable by this user
+mkdir -p "$(dirname "$LOCAL_FILE")"
+touch "$LOCAL_FILE"
+# Ensure HDFS dir exists (no need to pre-create files)
+$HDFS_BIN dfs -mkdir -p "$HDFS_DIR" || true
+$HDFS_BIN dfs -chmod 755 "$HDFS_DIR" || true
 
-cleanup() {
-  rm -f /tmp/${HDFS_PREFIX}_*.log 2>/dev/null || true
-}
+cleanup() { rm -f /tmp/${HDFS_PREFIX}_*.log 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo "[$(date -Is)] starting loop…"
+echo "[$(date -Is)] starting loop..."
 while true; do
   # 1) hit routes
   for cmd in "${commands[@]}"; do
@@ -40,26 +47,40 @@ while true; do
   # 2) wait for file-logger to flush its batch
   sleep "$FLUSH_WAIT"
 
+  # 2a) wait (up to 10s) for bytes to appear
+  tries=0
+  size=$(wc -c < "$LOCAL_FILE" 2>/dev/null || echo 0)
+  while [ "${size:-0}" -eq 0 ] && [ $tries -lt 10 ]; do
+    sleep 1
+    size=$(wc -c < "$LOCAL_FILE" 2>/dev/null || echo 0)
+    tries=$((tries+1))
+  done
+  echo "[$(date -Is)] local log size: ${size} bytes"
+
   # 3) snapshot -> truncate -> ship directly to timestamped HDFS file
   ts=$(date -u +%Y%m%dT%H%M%SZ)
   snap="/tmp/${HDFS_PREFIX}_${ts}.log"
   hdfs_tmp="${HDFS_DIR}/.${HDFS_PREFIX}_${ts}.log.tmp"
   hdfs_file="${HDFS_DIR}/${HDFS_PREFIX}_${ts}.log"
 
-  if [[ -f "$LOCAL_FILE" ]]; then
-    # snapshot current content then truncate local log
-    cp -f -- "$LOCAL_FILE" "$snap" || true
-    : > "$LOCAL_FILE"
-  fi
+  if [ "${size:-0}" -gt 0 ]; then
+    # POSIX-safe cp (no '--'); if cp fails, skip this cycle
+    if cp -f "$LOCAL_FILE" "$snap"; then
+      : > "$LOCAL_FILE"   # truncate local log so next cycle starts clean
+    else
+      echo "[$(date -Is)] ERROR: cp failed from $LOCAL_FILE to $snap"
+      sleep 5
+      continue
+    fi
 
-  if [[ -s "$snap" ]]; then
     # write to hidden temp, then atomic rename so readers only see complete files
-    if hdfs dfs -put -f "$snap" "$hdfs_tmp" && hdfs dfs -mv "$hdfs_tmp" "$hdfs_file"; then
-      hdfs dfs -chmod 644 "$hdfs_file" || true
-      echo "[$(date -Is)] shipped to hdfs://${hdfs_file}"
+    if $HDFS_BIN dfs -put -f "$snap" "$hdfs_tmp" && $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file"; then
+      $HDFS_BIN dfs -chmod 644 "$hdfs_file" || true
+      echo "[$(date -Is)] shipped to hdfs://$hdfs_file"
       rm -f "$snap"
     else
-      echo "[$(date -Is)] ERROR: HDFS upload failed; leaving snapshot at $snap"
+      echo "[$(date -Is)] ERROR: HDFS upload failed; snapshot kept at $snap"
+      $HDFS_BIN dfs -ls "$HDFS_DIR" || true
     fi
   else
     echo "[$(date -Is)] nothing to ship"
