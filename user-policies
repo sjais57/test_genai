@@ -1,31 +1,27 @@
 @app.post("/user-policies")
 async def list_user_policies(request: UserPoliciesRequest):
     start_time = time.time()
-    """List all policies applicable to a specific user and their groups"""
     applicable_policies = []
     client_dir = "policies/clients"
 
     if not os.path.exists(client_dir):
         return {"policies": []}
 
-    # Load the model YAML data (assuming this is available globally or needs to be loaded)
-    with open("models.yaml", 'r') as f:
-        model_yaml_data = yaml.safe_load(f)
+    # Load YAML if needed
+    with open("models.yaml", "r", encoding="utf-8") as f:
+        model_yaml_data = yaml.safe_load(f) or {}
 
     for file in os.listdir(client_dir):
         if file.endswith(".rego") and not file.endswith("_test.rego"):
-            policy_path = os.path.join(client_dir, file)
-            policy_path = policy_path.replace("\\", "/")
-
-            with open(policy_path, 'r') as f:
+            policy_path = os.path.join(client_dir, file).replace("\\", "/")
+            with open(policy_path, "r", encoding="utf-8") as f:
                 policy_content = f.read()
 
-            # Check if policy is enabled
             enabled_match = re.search(r'policy_enabled\s*:\s*(true|false)', policy_content)
             if enabled_match and enabled_match.group(1) == "false":
                 continue
 
-            # Extract lane_access
+            # -------- Lane Access --------
             lane_access = []
             lane_match = re.search(r'lane_access\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
             if lane_match:
@@ -40,54 +36,48 @@ async def list_user_policies(request: UserPoliciesRequest):
                     label = lane_mapping.get(value, value)
                     lane_access.append({"label": label, "value": value})
 
-            # Extract roles for the specific user
+            # -------- Roles --------
             roles = []
             roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
             if roles_match:
                 roles_content = roles_match.group(1)
-                # Look for user's role definition
                 user_role_match = re.search(rf'"{request.user_id}"\s*:\s*\[(.*?)\]', roles_content)
                 if user_role_match:
-                    roles = re.findall(r'"([^"]+)"', user_role_match.group(1))
+                    roles.extend(re.findall(r'"([^"]+)"', user_role_match.group(1)))
+                for group_id in request.group_ids:
+                    group_role_match = re.search(rf'"{group_id}"\s*:\s*\[(.*?)\]', roles_content)
+                    if group_role_match:
+                        roles.extend(re.findall(r'"([^"]+)"', group_role_match.group(1)))
+            roles = list(set(roles))
 
-            # Extract GPU constraints
+            # -------- GPU Constraint --------
             gpu = ""
             gpu_match = re.search(r'gpu_constraint\s*:\s*"(.*?)"', policy_content)
             if gpu_match:
                 gpu = gpu_match.group(1)
 
-            # Extract allowed models and get their unique_model_name
+            # -------- Allowed Models -> ll_models + deploy_models --------
             ll_models = []
             deploy_models = {}
-            
+
             models_match = re.search(r'allowed_models\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
             if models_match:
                 model_paths = re.findall(r'"([^"]+)"', models_match.group(1))
-                
                 for model_path in model_paths:
-                    # Get the model subtree from YAML data
                     subtree = get_model_subtree(model_yaml_data, model_path)
                     if not subtree:
                         continue
-                    
                     configs = subtree.get("configs", [])
                     if configs:
-                        # Get unique_model_name from the first config
                         unique_model_name = configs[0].get("unique_model_name", "")
-                        if unique_model_name:
+                        if unique_model_name and unique_model_name not in ll_models:
                             ll_models.append(unique_model_name)
-                        
-                        # Extract deploy frameworks for this model
-                        frameworks = []
-                        for cfg in configs:
-                            framework_name = cfg.get("framework", "")
-                            if framework_name and framework_name not in frameworks:
-                                frameworks.append(framework_name)
-                        
-                        if frameworks and unique_model_name:
-                            deploy_models[unique_model_name] = frameworks
 
-            # Check if user is directly mentioned or in groups
+                        frameworks = {cfg.get("framework", "") for cfg in configs if cfg.get("framework")}
+                        if frameworks and unique_model_name:
+                            deploy_models[unique_model_name] = list(frameworks)
+
+            # -------- User or group applicable --------
             user_match = re.search(rf'"{request.user_id}":\s*"(.*?)"', policy_content)
             group_matches = any(re.search(rf'"{group_id}":\s*"(.*?)"', policy_content) for group_id in request.group_ids)
 
@@ -102,6 +92,5 @@ async def list_user_policies(request: UserPoliciesRequest):
                 }
                 applicable_policies.append(policy_info)
 
-    end_time = time.time()
-    print(f"Total execution time: {end_time - start_time:.3f} seconds")
+    print(f"Total execution time: {time.time() - start_time:.3f} seconds")
     return {"policies": applicable_policies}
