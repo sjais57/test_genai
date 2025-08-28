@@ -1,180 +1,225 @@
-One-Line Summary of Problem
-
-“Today’s API gateways aren’t built for AI APIs — they can’t control token costs, stop prompt attacks, auto-scale LLM traffic, or give clear visibility. This creates financial risk, security gaps, and poor reliability for enterprises.”
-
-
-Business Problems Being Solved
-
-Uncontrolled AI Costs 💸
-
-LLMs charge per token, not per request.
-
-Without token-level control, a single oversized query can cause bill shocks.
-
-Businesses need budget enforcement per customer/tenant.
-
-Data Security & Trust 🔒
-
-AI can be manipulated via prompt injection attacks (“ignore rules and leak secrets”).
-
-Traditional API security tools don’t detect AI-specific threats.
-
-This creates compliance, IP leakage, and trust risks for enterprises.
-
-Unreliable User Experience 🐢
-
-AI workloads are bursty (e.g., product demos, customer traffic spikes).
-
-Without auto-scaling, customers face slow responses or downtime.
-
-Lack of Visibility for Leaders 👀
-
-Today’s logs don’t show who used how many tokens, how much it cost, or how much risk exists.
-
-Management cannot forecast cost, measure ROI, or enforce usage policies.
-
-
-
-
-🔹 Technical Problems Being Solved
-
-Static Rate Limits vs Dynamic Token Usage
-
-APIs rate-limit per request/sec.
-
-AI requires token-aware rate limiting for cost & quota management.
-
-No Defense Against Prompt Injection
-
-WAFs catch SQL/XSS, but not “ignore rules” type attacks.
-
-Need prompt-aware filtering (OPA/ML-based).
-
-Disconnected Scaling Mechanism
-
-APISIX doesn’t talk to autoscalers today.
-
-Need a feedback loop (Kafka → Prometheus → KEDA/HPA) for adaptive scaling.
-
-Missing AI-Specific Observability
-
-Logs = status code, latency.
-
-AI needs tokens per request, per tenant usage, blocked prompts, estimated cost.
-
-
-
-
-==
-Risk:
-:
-
-🔹 Business Risks
-
-Adoption Barrier
-
-Enterprises may hesitate to adopt a new plugin layer until it’s proven stable.
-
-Requires education and trust-building to show ROI (cost savings, security).
-
-Integration Complexity
-
-Must integrate with existing billing systems, monitoring stacks, and identity providers.
-
-If integration is delayed or costly, adoption slows down.
-
-Performance vs. Control Trade-off
-
-Adding token counting & prompt scanning could increase latency.
-
-If not optimized, this might hurt user experience.
-
-Evolving AI Threat Landscape
-
-Prompt attacks and token abuse patterns evolve fast.
-
-Gateway must continuously adapt or risk becoming outdated.
-
-🔹 Technical Risks
-
-Token Counting Accuracy
-
-Tokenizers differ between models (OpenAI vs HuggingFace).
-
-Miscounting tokens could cause wrong billing or quota enforcement.
-
-Prompt Security False Positives/Negatives
-
-A filter might accidentally block valid requests or miss new attack patterns.
-
-Requires continuous training & tuning.
-
-Scaling Loops & Stability
-
-If autoscaling signals are misconfigured, it may cause oscillations (scale up/down too often).
-
-Needs careful threshold design & testing.
-
-Resource Overhead in APISIX
-
-Extra plugins (token parsing, prompt filtering, observability) increase CPU/memory load.
-
-May require performance optimization and horizontal scaling of APISIX itself.
-
-🔹 Mitigation Strategies
-
-Start with shadow mode (observe token usage & prompt attacks without blocking initially).
-
-Validate token counting with multiple tokenizer libraries.
-
-Build configurable policies → let admins tune sensitivity of prompt filters.
-
-Add circuit breakers to autoscaling → prevent endless loops.
-
-Benchmark APISIX with plugins under high load to ensure performance.
-
-👉 One-liner risk summary for judges:
-
-“The main risks are performance overhead, accuracy of token counting, and evolving prompt attack patterns — but we mitigate these through careful plugin design, shadow mode testing, and continuous policy updates.”
-
-
-
-
-
-Not a Risk
-
-Core APISIX Stability
-
-We’re not rewriting APISIX — just extending it with plugins.
-
-APISIX remains stable, proven, and production-grade.
-
-Vendor Lock-In
-
-The solution works with any LLM provider (OpenAI, HuggingFace, custom models).
-
-No dependency on a single vendor or closed ecosystem.
-
-Breaking Existing APIs
-
-Normal REST/gRPC APIs continue working as-is.
-
-GenAI enhancements are add-ons, not breaking changes.
-
-Regulatory/Compliance Misalignment
-
-In fact, it helps with compliance (GDPR, HIPAA, SOC2) by giving visibility + access controls.
-
-So it reduces risk instead of adding.
-
-Business Adoption Resistance Due to Irrelevance
-
-GenAI adoption is booming → enterprises actively need cost control, security, observability.
-
-This solution solves real, urgent pain points.
-
-👉 One-liner for judges:
-
-“This idea doesn’t risk APISIX stability, vendor lock-in, or breaking existing APIs — instead, it strengthens compliance and directly addresses urgent enterprise needs.”
-
-Would you like me to add a “What is NOT a Risk” box alongside the Risks & Mitigations slide so you can show both sides clearly?
+# standalone_test_user_policies.py
+import os
+import re
+import time
+import shutil
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.testclient import TestClient
+
+# -----------------------------
+# Stubs to replace dependencies
+# -----------------------------
+def get_model_subtree(model_yaml_data: Dict[str, Any], model_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Simple stub that looks up a slash-separated path in a nested dict.
+    """
+    node: Any = model_yaml_data
+    for part in filter(None, model_path.split("/")):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
+
+# Minimal fake models tree that matches what your code expects
+model_yaml_data: Dict[str, Any] = {
+    "catalog": {
+        "nlp": {
+            "bert": {
+                "configs": [
+                    {
+                        "unique_model_name": "bert-base-fake",
+                        "inference_type": "http",
+                        "protocol": "v1",
+                        "tasks": "classification",
+                        "inference_type_available": "http,grpc",
+                        "script_name": "serve_bert.py",
+                        "hpc_model_name": "hpc_bert_v1",
+                    }
+                ]
+            }
+        }
+    }
+}
+
+# -----------------------------
+# Your endpoint (verbatim style)
+# -----------------------------
+app = FastAPI()
+
+class UserPoliciesRequest(BaseModel):
+    user_id: str
+    group_ids: List[str] = []
+
+@app.post("/user_policies")
+async def list_user_policies(request: UserPoliciesRequest):
+    start_time = time.time()
+    """List all policies applicable to a specific user and their groups"""
+    applicable_policies = []
+    client_dir = "policies/clients"
+
+    if not os.path.exists(client_dir):
+        return {"policies": []}
+
+    for file in os.listdir(client_dir):
+        if file.endswith(".rego") and not file.endswith("_test.rego"):
+            policy_path = os.path.join(client_dir, file)
+            # Convert Windows path to Unix-style for consistency
+            policy_path = policy_path.replace("\\", "/")
+
+            # Read the policy file to extract user and group roles
+            with open(policy_path, 'r', encoding="utf-8") as f:
+                policy_content = f.read()
+
+            # Check if policy is enabled (if enabled flag exists)
+            enabled_match = re.search(r'policy_enabled\s*:\s*(true|false)', policy_content)
+            # If enabled flag exists and is set to false, skip this policy
+            if enabled_match and enabled_match.group(1) == "false":
+                continue
+
+            allowed_model=[]
+            pattern = r'allowed_models\s*=\s*\[(.*?)\]'
+            match = re.search(pattern, policy_content, re.DOTALL)
+            if match:
+                models_str = match.group(1)
+                allowed_model = [m.strip() for m in re.findall(r'"([^"]+)"', models_str)]
+            allowed_models_info = []
+
+            for model_path in allowed_model:
+                subtree = get_model_subtree(model_yaml_data, model_path)
+                if not subtree:
+                    continue
+                configs = subtree.get("configs", [])
+                frameworks = []
+                for cfg in configs:
+                    frameworks.append({
+                        "inference_type": f"{cfg.get('inference_type', '')},{cfg.get('protocol', '')}",
+                        "tasks": cfg.get("tasks", ""),
+                        "inference_type_available": cfg.get("inference_type_available", ""),
+                        "script_name": cfg.get("script_name", ""),
+                        "hpc_model_name": cfg.get("hpc_model_name", "")
+                    })
+                allowed_models_info.append({
+                    "model_name": configs[0].get("unique_model_name", "") if configs else "",
+                    "frameworks": frameworks
+                })
+
+            # Check if user is directly mentioned in user_roles
+            user_match = re.search(rf'"request.user_id":\s*"(.*?)"', policy_content)
+
+            # Check if any of the user's groups are mentioned in group_roles
+            group_matches = []
+            for group_id in request.group_ids:
+                group_match = re.search(rf'"{re.escape(group_id)}":\s*"(.*?)"', policy_content)
+                if group_match:
+                    group_matches.append({
+                        "group_id": group_id,
+                        "role": group_match.group(1)
+                    })
+
+            # If either user or any group is found, add to applicable policies
+            if user_match or group_matches:
+                policy_info = {
+                    "policy_path": policy_path,
+                    "policy_name": os.path.basename(policy_path),
+                }
+
+                # Add enabled status if it exists
+                if enabled_match:
+                    policy_info["enabled"] = enabled_match.group(1) == "true"
+                else:
+                    policy_info["enabled"] = True # Default to enabled if flag doesn't exist
+
+                if user_match:
+                    policy_info["user_role"] = user_match.group(1)
+
+                if group_matches:
+                    policy_info["group_roles"] = group_matches
+
+                if allowed_model:
+                    policy_info["allowed_models"]=allowed_models_info
+
+                roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
+                if roles_match:
+                    roles_content = roles_match.group(1)
+                    policy_info["available_actions"] = {}
+
+                    # Extract user's direct role actions if available
+                    if user_match:
+                        user_role = user_match.group(1)
+                        role_actions_match = re.search(rf'"{re.escape(user_role)}":\s*\[(.*?)\]', roles_content)
+                        if role_actions_match:
+                            actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
+                            policy_info["available_actions"]["user"] = actions
+
+                    # Extract group role actions
+                    for group_match in group_matches:
+                        group_role = group_match["role"]
+                        role_actions_match = re.search(rf'"{re.escape(group_role)}":\s*\[(.*?)\]', roles_content)
+                        if role_actions_match:
+                            actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
+                            if "groups" not in policy_info["available_actions"]:
+                                policy_info["available_actions"]["groups"] = {}
+                            policy_info["available_actions"]["groups"][group_match["group_id"]] = actions
+
+                applicable_policies.append(policy_info)
+
+    end_time = time.time()
+    print(f"Total execution time: {end_time - start_time:.3f} seconds")
+    return {"policies": applicable_policies}
+
+# -----------------------------
+# Test bootstrapping
+# -----------------------------
+def _make_sample_policy_tree():
+    """
+    Creates policies/clients/ and writes a sample .rego-like text
+    that matches the regex patterns your code looks for.
+    """
+    root = "policies/clients"
+    if os.path.exists("policies"):
+        shutil.rmtree("policies")
+    os.makedirs(root, exist_ok=True)
+
+    policy_text = """# sample policy text
+policy_enabled: true
+allowed_models = ["catalog/nlp/bert"]
+
+# user & group declarations the regex will find:
+"request.user_id": "admin"
+"groupA": "viewer"
+
+# roles mapping that your code parses:
+roles = {
+  "admin": ["predict","train","deploy"],
+  "viewer": ["predict"]
+}
+"""
+    with open(os.path.join(root, "sample.rego"), "w", encoding="utf-8") as f:
+        f.write(policy_text)
+
+def run_smoke_test():
+    _make_sample_policy_tree()
+    client = TestClient(app)
+
+    # Case 1: user matches (admin)
+    resp1 = client.post(
+        "/user_policies",
+        json={"user_id": "u123", "group_ids": ["groupX"]}
+    )
+    print("\n== RESPONSE (user only) ==")
+    print(resp1.status_code, resp1.json())
+
+    # Case 2: group matches (groupA -> viewer)
+    resp2 = client.post(
+        "/user_policies",
+        json={"user_id": "u123", "group_ids": ["groupA"]}
+    )
+    print("\n== RESPONSE (group match) ==")
+    print(resp2.status_code, resp2.json())
+
+if __name__ == "__main__":
+    run_smoke_test()
