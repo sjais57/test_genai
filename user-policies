@@ -7,11 +7,6 @@ async def list_user_policies(request: UserPoliciesRequest):
     if not os.path.exists(client_dir):
         return {"policies": []}
 
-    # Load your models YAML once here if needed
-    # with open("path/to/model.yaml", "r") as f:
-    #     model_yaml_data = yaml.safe_load(f)
-    model_yaml_data = {}  # placeholder
-
     for file in os.listdir(client_dir):
         if file.endswith(".rego") and not file.endswith("_test.rego"):
             policy_path = os.path.join(client_dir, file)
@@ -25,69 +20,59 @@ async def list_user_policies(request: UserPoliciesRequest):
             if enabled_match and enabled_match.group(1) == "false":
                 continue
 
-            # Extract allowed models
-            allowed_model = []
-            match = re.search(r'allowed_models\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
-            if match:
-                models_str = match.group(1)
-                allowed_model = [m.strip() for m in re.findall(r'"([^"]+)"', models_str)]
+            # --- Extract lane_access (JSON-like array inside rego) ---
+            lane_access = []
+            lane_match = re.search(r'lane_access\s*=\s*(\[[^\]]*\])', policy_content, re.DOTALL)
+            if lane_match:
+                try:
+                    lane_access = json.loads(lane_match.group(1).replace("'", '"'))
+                except Exception:
+                    pass  # skip if malformed
 
+            # --- Extract gpu ---
+            gpu = ""
+            gpu_match = re.search(r'gpu\s*:\s*"?([\w\-]*)"?', policy_content)
+            if gpu_match:
+                gpu = gpu_match.group(1)
+
+            # --- Extract allowed models ---
             ll_models = []
+            models_match = re.search(r'allowed_models\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
+            if models_match:
+                ll_models = re.findall(r'"([^"]+)"', models_match.group(1))
+
+            # --- Extract deploy_models ---
             deploy_models = {}
+            deploy_match = re.search(r'deploy_models\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
+            if deploy_match:
+                deploy_str = "{" + deploy_match.group(1) + "}"
+                try:
+                    deploy_models = json.loads(
+                        deploy_str.replace("=", ":").replace("'", '"')
+                    )
+                except Exception:
+                    pass
 
-            for model_path in allowed_model:
-                subtree = get_model_subtree(model_yaml_data, model_path)
-                if not subtree:
-                    # If YAML not available, still add raw model name
-                    ll_models.append(model_path)
-                    continue
-
-                configs = subtree.get("configs", [])
-                if not configs:
-                    ll_models.append(model_path)
-                    continue
-
-                # Take unique model name
-                model_name = configs[0].get("unique_model_name", model_path)
-                ll_models.append(model_name)
-
-                # Collect deployment options (frameworks)
-                frameworks = []
-                for cfg in configs:
-                    inference_type = cfg.get("inference_type", "")
-                    protocol = cfg.get("protocol", "")
-                    combo = f"{inference_type}_{protocol}" if protocol else inference_type
-                    frameworks.append(combo)
-                deploy_models[model_name] = frameworks
-
-            # Check user role
-            user_match = re.search(rf'"{request.user_id}":\s*"(.*?)"', policy_content)
-
-            # Check group roles
+            # --- Extract roles for user + groups ---
             roles = []
+            user_match = re.search(rf'"{request.user_id}"\s*:\s*"(.*?)"', policy_content)
             if user_match:
                 roles.append(user_match.group(1))
 
             for group_id in request.group_ids:
-                group_match = re.search(rf'"{group_id}":\s*"(.*?)"', policy_content)
+                group_match = re.search(rf'"{group_id}"\s*:\s*"(.*?)"', policy_content)
                 if group_match:
                     roles.append(group_match.group(1))
 
             if not roles:
-                # If no roles for user/groups, skip this policy
+                # no user/group role in this policy
                 continue
-
-            # Example: hardcoding lane_access mapping
-            lane_access = [
-                {"label": "Training (Non-Public Data)", "value": "training_pvt"},
-                {"label": "Training (Public Data)", "value": "training_pub"}
-            ]
 
             policy_info = {
                 "policy_name": policy_name,
                 "lane_access": lane_access,
                 "role": roles,
-                "gpu": "",
+                "gpu": gpu,
                 "ll_models": ll_models,
                 "deploy_models": deploy_models
             }
@@ -96,5 +81,4 @@ async def list_user_policies(request: UserPoliciesRequest):
 
     end_time = time.time()
     print(f"Total execution time: {end_time - start_time:.3f} seconds")
-
     return {"policies": applicable_policies}
