@@ -1,24 +1,26 @@
 @app.post("/user-policies")
 async def list_user_policies(request: UserPoliciesRequest):
     start_time = time.time()
+    """List all policies applicable to a specific user and their groups"""
     applicable_policies = []
     client_dir = "policies/clients"
 
     if not os.path.exists(client_dir):
         return {"policies": []}
 
-    # Load YAML if needed
-    with open("models.yaml", "r", encoding="utf-8") as f:
-        model_yaml_data = yaml.safe_load(f) or {}
-
     for file in os.listdir(client_dir):
         if file.endswith(".rego") and not file.endswith("_test.rego"):
-            policy_path = os.path.join(client_dir, file).replace("\\", "/")
-            with open(policy_path, "r", encoding="utf-8") as f:
+            policy_path = os.path.join(client_dir, file)
+            # Convert Windows path to Unix-style for consistency
+            policy_path = policy_path.replace("\\", "/")
+
+            # Read the policy file to extract user and group roles
+            with open(policy_path, 'r', encoding="utf-8") as f:
                 policy_content = f.read()
 
+            # Check if policy is enabled (if enabled flag exists)
             enabled_match = re.search(r'policy_enabled\s*:\s*(true|false)', policy_content)
-            if enabled_match and enabled_match.group(1) == "false":
+            if enabled_match and enabled_match.group(1).lower() == "false":
                 continue
 
             # -------- Lane Access --------
@@ -41,14 +43,16 @@ async def list_user_policies(request: UserPoliciesRequest):
             roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
             if roles_match:
                 roles_content = roles_match.group(1)
+                # Direct user roles
                 user_role_match = re.search(rf'"{request.user_id}"\s*:\s*\[(.*?)\]', roles_content)
                 if user_role_match:
                     roles.extend(re.findall(r'"([^"]+)"', user_role_match.group(1)))
+                # Group roles
                 for group_id in request.group_ids:
                     group_role_match = re.search(rf'"{group_id}"\s*:\s*\[(.*?)\]', roles_content)
                     if group_role_match:
                         roles.extend(re.findall(r'"([^"]+)"', group_role_match.group(1)))
-            roles = list(set(roles))
+            roles = list(set(roles))  # dedupe
 
             # -------- GPU Constraint --------
             gpu = ""
@@ -56,7 +60,7 @@ async def list_user_policies(request: UserPoliciesRequest):
             if gpu_match:
                 gpu = gpu_match.group(1)
 
-            # -------- Allowed Models -> ll_models + deploy_models --------
+            # -------- Allowed Models (ll_models + deploy_models) --------
             ll_models = []
             deploy_models = {}
 
@@ -77,9 +81,11 @@ async def list_user_policies(request: UserPoliciesRequest):
                         if frameworks and unique_model_name:
                             deploy_models[unique_model_name] = list(frameworks)
 
-            # -------- User or group applicable --------
+            # -------- Check if applicable (user or groups) --------
             user_match = re.search(rf'"{request.user_id}":\s*"(.*?)"', policy_content)
-            group_matches = any(re.search(rf'"{group_id}":\s*"(.*?)"', policy_content) for group_id in request.group_ids)
+            group_matches = any(
+                re.search(rf'"{group_id}":\s*"(.*?)"', policy_content) for group_id in request.group_ids
+            )
 
             if user_match or group_matches:
                 policy_info = {
@@ -92,5 +98,6 @@ async def list_user_policies(request: UserPoliciesRequest):
                 }
                 applicable_policies.append(policy_info)
 
-    print(f"Total execution time: {time.time() - start_time:.3f} seconds")
+    end_time = time.time()
+    print(f"Total execution time: {end_time - start_time:.3f} seconds")
     return {"policies": applicable_policies}
