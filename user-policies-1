@@ -1,88 +1,40 @@
-@app.post("/user_policies")
-async def list_user_policies(request: UserPoliciesRequest):
-    start_time = time.time()
-    """List all policies applicable to a specific user and their groups"""
-    applicable_policies = []
-    client_dir = "policies/clients"
+if user_match or group_matches:
+    policy_info = {
+        "policy_path": policy_path,
+        "policy_name": os.path.basename(policy_path),
+    }
 
-    if not os.path.exists(client_dir):
-        return {"policies": []}
+    # Add enabled status if it exists
+    if enabled_match:
+        policy_info["enabled"] = enabled_match.group(1) == "true"
+    else:
+        policy_info["enabled"] = True
 
-    for file in os.listdir(client_dir):
-        if file.endswith(".rego") and not file.endswith("_test.rego"):
-            policy_path = os.path.join(client_dir, file)
-            policy_path = policy_path.replace("\\", "/")
+    if allowed_model:
+        policy_info["allowed_models"] = allowed_models_info
 
-            with open(policy_path, 'r') as f:
-                policy_content = f.read()
+    roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
+    if roles_match:
+        roles_content = roles_match.group(1)
+        all_actions = []  # To collect all actions for the role field
 
-            # Check if policy is enabled
-            enabled_match = re.search(r'policy_enabled\s*:\s*(true|false)', policy_content)
-            if enabled_match and enabled_match.group(1) == "false":
-                continue
+        # Extract user's direct role actions if available
+        if user_match:
+            user_role = user_match.group(1)
+            role_actions_match = re.search(rf'"{user_role}":\s*\[(.*?)\]', roles_content)
+            if role_actions_match:
+                actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
+                all_actions.extend(actions)
 
-            # Extract lane_access (assuming format: lane_access = ["training_pvt", "training_pub"])
-            lane_access = []
-            lane_match = re.search(r'lane_access\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
-            if lane_match:
-                lane_values = re.findall(r'"([^"]+)"', lane_match.group(1))
-                lane_mapping = {
-                    "training_pvt": "Training (Non-Public Data)",
-                    "training_pub": "Training (Public Data)",
-                    "inference_pvt": "Inference (Non-Public Data)",
-                    "inference_pub": "Inference (Public Data)"
-                }
-                for value in lane_values:
-                    label = lane_mapping.get(value, value)
-                    lane_access.append({"label": label, "value": value})
+        # Extract group role actions
+        for group_match in group_matches:
+            group_role = group_match["role"]
+            role_actions_match = re.search(rf'"{group_role}":\s*\[(.*?)\]', roles_content)
+            if role_actions_match:
+                actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
+                all_actions.extend(actions)
 
-            # Extract roles (assuming format: roles = {"admin": ["train", "deploy"], "user": ["view"]})
-            roles = []
-            roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
-            if roles_match:
-                roles_content = roles_match.group(1)
-                # Find user's specific role actions
-                user_roles_match = re.search(rf'"({request.user_id}|[^"]*)"\s*:\s*\[(.*?)\]', roles_content)
-                if user_roles_match:
-                    roles = re.findall(r'"([^"]+)"', user_roles_match.group(2))
+        # Add combined actions to role field (remove duplicates)
+        policy_info["role"] = list(set(all_actions))
 
-            # Extract GPU constraints
-            gpu = ""
-            gpu_match = re.search(r'gpu_constraint\s*:\s*"(.*?)"', policy_content)
-            if gpu_match:
-                gpu = gpu_match.group(1)
-
-            # Extract LL models (allowed models)
-            ll_models = []
-            models_match = re.search(r'allowed_models\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
-            if models_match:
-                ll_models = re.findall(r'"([^"]+)"', models_match.group(1))
-
-            # Extract deploy models with frameworks (assuming format: deploy_frameworks = {"model1": ["vllm", "triton"], "model2": ["framework1"]})
-            deploy_models = {}
-            deploy_match = re.search(r'deploy_frameworks\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
-            if deploy_match:
-                deploy_content = deploy_match.group(1)
-                model_matches = re.findall(r'"([^"]+)"\s*:\s*\[(.*?)\]', deploy_content)
-                for model_name, frameworks_str in model_matches:
-                    frameworks = re.findall(r'"([^"]+)"', frameworks_str)
-                    deploy_models[model_name] = frameworks
-
-            # Check if user is directly mentioned or in groups
-            user_match = re.search(rf'"{request.user_id}":\s*"(.*?)"', policy_content)
-            group_matches = any(re.search(rf'"{group_id}":\s*"(.*?)"', policy_content) for group_id in request.group_ids)
-
-            if user_match or group_matches:
-                policy_info = {
-                    "policy_name": os.path.basename(policy_path),
-                    "lane_access": lane_access,
-                    "role": roles,
-                    "gpu": gpu,
-                    "ll_models": ll_models,
-                    "deploy_models": deploy_models
-                }
-                applicable_policies.append(policy_info)
-
-    end_time = time.time()
-    print(f"Total execution time: {end_time - start_time:.3f} seconds")
-    return {"policies": applicable_policies}
+    applicable_policies.append(policy_info)
