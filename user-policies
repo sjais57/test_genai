@@ -11,92 +11,81 @@ async def list_user_policies(request: UserPoliciesRequest):
     for file in os.listdir(client_dir):
         if file.endswith(".rego") and not file.endswith("_test.rego"):
             policy_path = os.path.join(client_dir, file)
-            # Convert Windows path to Unix-style for consistency
             policy_path = policy_path.replace("\\", "/")
 
-            # Read the policy file to extract user and group roles
-            with open(policy_path, 'r', encoding="utf-8") as f:
+            with open(policy_path, 'r') as f:
                 policy_content = f.read()
 
-            # Check if policy is enabled (if enabled flag exists)
+            # Check enabled flag
             enabled_match = re.search(r'policy_enabled\s*:\s*(true|false)', policy_content)
-            if enabled_match and enabled_match.group(1).lower() == "false":
+            if enabled_match and enabled_match.group(1) == "false":
                 continue
 
-            # -------- Lane Access --------
-            lane_access = []
-            lane_match = re.search(r'lane_access\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
-            if lane_match:
-                lane_values = re.findall(r'"([^"]+)"', lane_match.group(1))
-                lane_mapping = {
-                    "training_pvt": "Training (Non-Public Data)",
-                    "training_pub": "Training (Public Data)",
-                    "inference_pvt": "Inference (Non-Public Data)",
-                    "inference_pub": "Inference (Public Data)"
-                }
-                for value in lane_values:
-                    label = lane_mapping.get(value, value)
-                    lane_access.append({"label": label, "value": value})
+            # Extract allowed models
+            allowed_model = []
+            pattern = r'allowed_models\s*=\s*\[(.*?)\]'
+            match = re.search(pattern, policy_content, re.DOTALL)
+            if match:
+                models_str = match.group(1)
+                allowed_model = [m.strip() for m in re.findall(r'"([^"]+)"', models_str)]
 
-            # -------- Roles --------
-            roles = []
-            roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
-            if roles_match:
-                roles_content = roles_match.group(1)
-                # Direct user roles
-                user_role_match = re.search(rf'"{request.user_id}"\s*:\s*\[(.*?)\]', roles_content)
-                if user_role_match:
-                    roles.extend(re.findall(r'"([^"]+)"', user_role_match.group(1)))
-                # Group roles
-                for group_id in request.group_ids:
-                    group_role_match = re.search(rf'"{group_id}"\s*:\s*\[(.*?)\]', roles_content)
-                    if group_role_match:
-                        roles.extend(re.findall(r'"([^"]+)"', group_role_match.group(1)))
-            roles = list(set(roles))  # dedupe
-
-            # -------- GPU Constraint --------
-            gpu = ""
-            gpu_match = re.search(r'gpu_constraint\s*:\s*"(.*?)"', policy_content)
-            if gpu_match:
-                gpu = gpu_match.group(1)
-
-            # -------- Allowed Models (ll_models + deploy_models) --------
-            ll_models = []
+            # Convert to your required structure
+            model_names = []
             deploy_models = {}
 
-            models_match = re.search(r'allowed_models\s*=\s*\[(.*?)\]', policy_content, re.DOTALL)
-            if models_match:
-                model_paths = re.findall(r'"([^"]+)"', models_match.group(1))
-                for model_path in model_paths:
-                    subtree = get_model_subtree(model_yaml_data, model_path)
-                    if not subtree:
-                        continue
-                    configs = subtree.get("configs", [])
-                    if configs:
-                        unique_model_name = configs[0].get("unique_model_name", "")
-                        if unique_model_name and unique_model_name not in ll_models:
-                            ll_models.append(unique_model_name)
+            for model_path in allowed_model:
+                subtree = get_model_subtree(model_yaml_data, model_path)
+                if not subtree:
+                    continue
+                configs = subtree.get("configs", [])
+                for cfg in configs:
+                    model_names.append(cfg.get("unique_model_name", ""))
+                    hpc_model = cfg.get("hpc_model_name", "")
+                    if hpc_model:
+                        if hpc_model not in deploy_models:
+                            deploy_models[hpc_model] = []
+                        deploy_models[hpc_model].append(cfg.get("inference_type", ""))
 
-                        frameworks = {cfg.get("framework", "") for cfg in configs if cfg.get("framework")}
-                        if frameworks and unique_model_name:
-                            deploy_models[unique_model_name] = list(frameworks)
+            # Extract user role
+            user_role = []
+            user_match = re.search(rf'"request.user_id":\s*"(.*?)"', policy_content)
+            if user_match:
+                # You may want to fetch the label from somewhere else (mapping table)
+                user_role.append({
+                    "label": "User Role",   # Placeholder label
+                    "value": user_match.group(1)
+                })
 
-            # -------- Check if applicable (user or groups) --------
-            user_match = re.search(rf'"{request.user_id}":\s*"(.*?)"', policy_content)
-            group_matches = any(
-                re.search(rf'"{group_id}":\s*"(.*?)"', policy_content) for group_id in request.group_ids
-            )
+            # Extract group roles
+            group_roles = []
+            group_role_labels = []
+            for group_id in request.group_ids:
+                group_match = re.search(rf'"{group_id}":\s*"(.*?)"', policy_content)
+                if group_match:
+                    role_val = group_match.group(1)
+                    group_roles.append(role_val)
+                    group_role_labels.append({
+                        "label": f"Group {group_id}",
+                        "value": group_id
+                    })
+            # Merge group roles into user_role field (with label/value format)
+            user_role.extend(group_role_labels)
 
-            if user_match or group_matches:
-                policy_info = {
-                    "policy_name": os.path.basename(policy_path),
-                    "lane_access": lane_access,
-                    "role": roles,
-                    "gpu": gpu,
-                    "ll_models": ll_models,
-                    "deploy_models": deploy_models
-                }
-                applicable_policies.append(policy_info)
+            # GPU info (if defined in rego)
+            gpu_match = re.search(r'gpu\s*:\s*"(.*?)"', policy_content)
+            gpu_val = gpu_match.group(1) if gpu_match else ""
+
+            # Final response structure
+            policy_info = {
+                "policy_name": os.path.basename(policy_path),
+                "user_role": user_role,
+                "group_roles": group_roles,
+                "gpu": gpu_val,
+                "model_name": list(set(filter(None, model_names))),
+                "deploy_models": deploy_models
+            }
+
+            applicable_policies.append(policy_info)
 
     end_time = time.time()
     print(f"Total execution time: {end_time - start_time:.3f} seconds")
