@@ -10,13 +10,38 @@ if user_match or group_matches:
     else:
         policy_info["enabled"] = True
 
+    if user_match:
+        policy_info["user_role"] = user_match.group(1)
+
+    if group_matches:
+        policy_info["group_roles"] = group_matches
+
     if allowed_model:
         policy_info["allowed_models"] = allowed_models_info
+        
+        # Create deploy_models structure
+        deploy_models = {}
+        for model_info in allowed_models_info:
+            model_name = model_info.get("model_name", "")
+            if model_name:
+                model_deployments = []
+                for framework in model_info.get("frameworks", []):
+                    hpc_model_name = framework.get("hpc_model_name", "")
+                    if hpc_model_name:  # Only add if hpc_model_name exists
+                        model_deployments.append({
+                            "inference_type": hpc_model_name,
+                            "tasks": framework.get("tasks", 2)  # Default to 2 if not specified
+                        })
+                
+                if model_deployments:
+                    deploy_models[model_name] = model_deployments
+        
+        policy_info["deploy_models"] = deploy_models
 
     roles_match = re.search(r'roles\s*=\s*\{(.*?)\}', policy_content, re.DOTALL)
     if roles_match:
         roles_content = roles_match.group(1)
-        all_actions = []  # To collect all actions for the role field
+        policy_info["available_actions"] = {}
 
         # Extract user's direct role actions if available
         if user_match:
@@ -24,7 +49,7 @@ if user_match or group_matches:
             role_actions_match = re.search(rf'"{user_role}":\s*\[(.*?)\]', roles_content)
             if role_actions_match:
                 actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
-                all_actions.extend(actions)
+                policy_info["available_actions"]["user"] = actions
 
         # Extract group role actions
         for group_match in group_matches:
@@ -32,9 +57,8 @@ if user_match or group_matches:
             role_actions_match = re.search(rf'"{group_role}":\s*\[(.*?)\]', roles_content)
             if role_actions_match:
                 actions = re.findall(r'"([^"]+)"', role_actions_match.group(1))
-                all_actions.extend(actions)
-
-        # Add combined actions to role field (remove duplicates)
-        policy_info["role"] = list(set(all_actions))
+                if "groups" not in policy_info["available_actions"]:
+                    policy_info["available_actions"]["groups"] = {}
+                policy_info["available_actions"]["groups"][group_match["group_id"]] = actions
 
     applicable_policies.append(policy_info)
