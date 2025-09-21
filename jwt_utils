@@ -1,0 +1,122 @@
+@app.route('/token', methods=['POST'])
+def login():
+    if not request.is_json:
+        return jsonify({"error": "Missing JSON in request"}), 400
+
+    username = request.json.get('username', None)
+    password = request.json.get('password', None)
+    api_key = request.json.get('api_key', None)
+    custom_secret = request.json.get('secret', None)
+
+    if not username or not password:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    # Authenticate based on the configured method
+    if AUTH_METHOD == "ldap":
+        authenticated, user_data = authenticate_ldap(username, password)
+    else:  # file-based authentication
+        authenticated, user_data = authenticate_file(username, password)
+
+    if not authenticated:
+        error_message = "Invalid username or password"
+        if "error" in user_data:
+            error_message = user_data["error"]
+        return jsonify({"error": error_message}), 401
+
+    # Create user context for dynamic claims processing
+    user_context = {
+        "user_id": username,
+        "email": user_data.get("email", ""),
+        "groups": user_data.get("groups", []),
+        "roles": user_data.get("roles", []),
+        "team_id": get_team_id_from_user(username, user_data)
+    }
+
+    # If an API key was provided, check pre-validation and get additional claims
+    if api_key:
+        # Check pre-validation before processing API key
+        validation_result = check_pre_validation(api_key, user_context)
+        if not validation_result["valid"]:
+            return jsonify({
+                "error": validation_result["message"],
+                "required_group": validation_result.get("required_group")
+            }), 403
+        
+        # Create a proper user context for dynamic claims
+        user_context = {
+            "user_id": username,
+            "team_id": get_team_id_from_user(username, user_data),
+            "groups": user_data.get("groups", []),
+            "api_key_id": api_key
+        }
+        logger.info(f"Processing API key with user_context: {user_context}")
+        api_key_claims = get_additional_claims(api_key, user_context)
+    else:
+        api_key_claims = get_additional_claims(None, user_context)
+
+    # ... rest of your existing token generation code ...
+
+
+
+
+def check_pre_validation(api_key: str, user_context: dict) -> dict:
+    """
+    Check if the user meets the pre-validation requirements for the API key
+    
+    Args:
+        api_key: The API key string
+        user_context: User context containing groups and other info
+        
+    Returns:
+        Dict with validation result and message
+    """
+    try:
+        # Load the API key configuration
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+        
+        if not os.path.exists(api_key_file):
+            return {
+                "valid": False,
+                "message": "Invalid API key"
+            }
+        
+        with open(api_key_file, 'r') as f:
+            api_key_config = yaml.safe_load(f)
+        
+        # Check if pre_validation_check is configured
+        required_group = api_key_config.get('pre_validation_check')
+        if not required_group:
+            # No pre-validation required
+            return {
+                "valid": True,
+                "message": "No pre-validation required"
+            }
+        
+        # Get user groups (convert to lowercase for case-insensitive comparison)
+        user_groups = [group.lower() for group in user_context.get('groups', [])]
+        required_group_lower = required_group.lower()
+        
+        # Check if user has the required group
+        user_has_access = any(required_group_lower in group.lower() for group in user_groups)
+        
+        if user_has_access:
+            return {
+                "valid": True,
+                "message": f"User has access to required group: {required_group}",
+                "required_group": required_group
+            }
+        else:
+            return {
+                "valid": False,
+                "message": f"User does not have access to required group: {required_group}",
+                "required_group": required_group,
+                "user_groups": user_groups
+            }
+            
+    except Exception as e:
+        logger.error(f"Error during pre-validation check: {str(e)}")
+        return {
+            "valid": False,
+            "message": f"Error during validation: {str(e)}"
+        }
