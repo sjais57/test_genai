@@ -22,12 +22,15 @@ def login():
         if "error" in user_data:
             error_message = user_data["error"]
         return jsonify({"error": error_message}), 401
+    
+    raw_groups = user_data.get("groups", [])
+    normalized_groups = extract_group_cn(raw_groups)
 
     # Create user context for dynamic claims processing
     user_context = {
         "user_id": username,
         "email": user_data.get("email", ""),
-        "groups": user_data.get("groups", []),
+        "groups": normalized_groups,
         "roles": user_data.get("roles", []),
         "team_id": get_team_id_from_user(username, user_data)
     }
@@ -35,7 +38,7 @@ def login():
     # If an API key was provided, check pre-validation and get additional claims
     if api_key:
         # Check pre-validation before processing API key
-        validation_result = check_pre_validation(api_key, user_context)
+        validation_result = check_pre_validation(api_key, normalized_groups)
         if not validation_result["valid"]:
             return jsonify({
                 "error": validation_result["message"],
@@ -46,7 +49,7 @@ def login():
         user_context = {
             "user_id": username,
             "team_id": get_team_id_from_user(username, user_data),
-            "groups": user_data.get("groups", []),
+            "groups": normalized_groups,  # Use normalized groups for dynamic claims
             "api_key_id": api_key
         }
         logger.info(f"Processing API key with user_context: {user_context}")
@@ -54,18 +57,91 @@ def login():
     else:
         api_key_claims = get_additional_claims(None, user_context)
 
-    # ... rest of your existing token generation code ...
+    # Log which API key is being used
+    if api_key:
+        logger.info(f"Using provided API key: {api_key}")
+    else:
+        logger.info("No API key provided, using base API key")
+
+    # Merge user data with additional claims
+    claims = {**user_data, **api_key_claims}
+    
+    # Get expiration time from API key configuration if available
+    expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]  # Default
+    if 'exp_hours' in claims:
+        expires_delta = timedelta(hours=claims['exp_hours'])
+        logger.info(f"Using custom expiration time from API key: {claims['exp_hours']} hours")
+        # Remove exp_hours from claims to avoid conflicts
+        claims.pop('exp_hours')
+    
+    # If custom secret is provided, use it with PyJWT directly instead of flask_jwt_extended
+    if custom_secret:
+        import jwt
+        import datetime as dt
+        
+        # Log that we're using a custom secret
+        logger.info(f"Using custom secret for token generation")
+        
+        # Prepare the payload with the standard JWT claims
+        now = dt.datetime.now(dt.timezone.utc)
+        access_token_exp = now + expires_delta
+        refresh_token_exp = now + app.config["JWT_REFRESH_TOKEN_EXPIRES"]
+        
+        # Add standard JWT claims to the payload
+        access_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": access_token_exp,
+            "sub": username,
+            "type": "access",
+            "fresh": True,
+            **claims  # Include all the additional claims
+        }
+        
+        refresh_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": refresh_token_exp,
+            "sub": username,
+            "type": "refresh",
+            **claims  # Include all the additional claims
+        }
+        
+        # Generate the tokens using PyJWT directly with the custom secret
+        algorithm = app.config.get('JWT_ALGORITHM', 'HS256')
+        access_token = jwt.encode(access_payload, custom_secret, algorithm=algorithm)
+        refresh_token = jwt.encode(refresh_payload, custom_secret, algorithm=algorithm)
+        
+        # Add note to response indicating custom secret was used
+        return jsonify({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "note": "Tokens generated with custom secret - will not be usable with standard application routes unless the same secret is provided for verification"
+        }), 200
+    else:
+        # Standard token creation with application secret
+        access_token = create_access_token(
+            identity=username, 
+            additional_claims=claims,
+            expires_delta=expires_delta,
+            fresh=True  # Mark the token as fresh since it's from direct login
+        )
+        refresh_token = create_refresh_token(identity=username, additional_claims=claims)
+        
+        return jsonify(access_token=access_token, refresh_token=refresh_token), 200
 
 
 
 
-def check_pre_validation(api_key: str, user_context: dict) -> dict:
+def check_pre_validation(api_key: str, normalized_groups: list) -> dict:
     """
     Check if the user meets the pre-validation requirements for the API key
     
     Args:
         api_key: The API key string
-        user_context: User context containing groups and other info
+        normalized_groups: List of normalized group names from user
         
     Returns:
         Dict with validation result and message
@@ -93,12 +169,11 @@ def check_pre_validation(api_key: str, user_context: dict) -> dict:
                 "message": "No pre-validation required"
             }
         
-        # Get user groups (convert to lowercase for case-insensitive comparison)
-        user_groups = [group.lower() for group in user_context.get('groups', [])]
-        required_group_lower = required_group.lower()
+        # Normalize the required group name (convert to lowercase)
+        required_group_normalized = required_group.lower()
         
-        # Check if user has the required group
-        user_has_access = any(required_group_lower in group.lower() for group in user_groups)
+        # Check if user has the required group in their normalized groups
+        user_has_access = required_group_normalized in [group.lower() for group in normalized_groups]
         
         if user_has_access:
             return {
@@ -111,7 +186,7 @@ def check_pre_validation(api_key: str, user_context: dict) -> dict:
                 "valid": False,
                 "message": f"User does not have access to required group: {required_group}",
                 "required_group": required_group,
-                "user_groups": user_groups
+                "user_groups": normalized_groups
             }
             
     except Exception as e:
