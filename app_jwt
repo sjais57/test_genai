@@ -39,13 +39,20 @@ except ImportError:
     GES_AVAILABLE = False
     logger.warning("GES integration not available - install ges_entitylements package")
 
+# Import GES integration functions
+try:
+    from claims.ges_integration import ges_manager, validate_namespace_membership
+    GES_INTEGRATION_AVAILABLE = True
+except ImportError:
+    GES_INTEGRATION_AVAILABLE = False
+    logger.warning("GES integration modules not available")
+
 # Ensure the templates directory exists
 templates_dir = pathlib.Path(__file__).parent / 'templates'
 templates_dir.mkdir(exist_ok=True)
 
 # Initialize Flask app
-app = Flask(__name__, 
-            template_folder=str(templates_dir))
+app = Flask(__name__, template_folder=str(templates_dir))
 
 # Configure Swagger UI
 SWAGGER_URL = '/dspai-docs'
@@ -55,7 +62,7 @@ swaggerui_blueprint = get_swaggerui_blueprint(
     SWAGGER_URL,
     API_URL,
     config={
-        'app_name': "JWT Auth API Documentation",
+        'app_name': "JWT Auth API with GES Integration",
         'deepLinking': True,
         'defaultModelsExpandDepth': 2,
         'defaultModelExpandDepth': 2,
@@ -97,26 +104,6 @@ if AUTH_METHOD == "ldap" and not LDAP_AVAILABLE:
     logger.warning("Falling back to file-based authentication.")
     AUTH_METHOD = "file"
 
-# Initialize GES service if enabled
-ges_service = None
-if GES_ENABLED and GES_AVAILABLE:
-    if all([GES_HOSTNAME, GES_CLIENT_ID, GES_CLIENT_KEY]):
-        try:
-            ges_service = EntitlementsService(
-                hostname=GES_HOSTNAME,
-                port=GES_PORT,
-                namespace=GES_NAMESPACE,
-                client_id=GES_CLIENT_ID,
-                client_key=GES_CLIENT_KEY
-            )
-            logger.info("GES service initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize GES service: {str(e)}")
-            ges_service = None
-    else:
-        logger.warning("GES enabled but missing required configuration (hostname, client_id, client_key)")
-        GES_ENABLED = False
-
 jwt = JWTManager(app)
 
 @app.route('/')
@@ -143,55 +130,59 @@ def extract_group_cn(groups):
             ordered.append(n)
     return ordered
 
-def get_ges_roles(username: str) -> list:
+def get_ges_roles_for_namespace(username: str, namespace: str = None) -> list:
     """
-    Get roles from GES service for a user
+    Get roles from GES service for a user in specific namespace
     
     Args:
         username: The username to get roles for
+        namespace: Specific namespace (optional)
         
     Returns:
         List of roles from GES
     """
-    if not GES_ENABLED or not ges_service:
+    if not GES_ENABLED or not GES_AVAILABLE:
         logger.debug("GES not enabled or service not available")
         return []
     
     try:
-        roles = ges_service.get_roles(username)
-        logger.info(f"Retrieved GES roles for {username}: {roles}")
+        if not hasattr(app, 'ges_service') or app.ges_service is None:
+            # Initialize GES service if not already done
+            if all([GES_HOSTNAME, GES_CLIENT_ID, GES_CLIENT_KEY]):
+                app.ges_service = EntitlementsService(
+                    hostname=GES_HOSTNAME,
+                    port=GES_PORT,
+                    namespace=GES_NAMESPACE,
+                    client_id=GES_CLIENT_ID,
+                    client_key=GES_CLIENT_KEY
+                )
+                logger.info("GES service initialized successfully")
+            else:
+                logger.warning("GES configuration incomplete")
+                return []
+        
+        # Use specific namespace if provided, otherwise use default
+        target_namespace = namespace if namespace else GES_NAMESPACE
+        
+        # Get roles for user
+        roles = app.ges_service.get_roles(username)
+        logger.info(f"Retrieved GES roles for {username} in namespace {target_namespace}: {roles}")
         return roles
     except Exception as e:
         logger.error(f"Error getting GES roles for {username}: {str(e)}")
         return []
 
-def merge_groups_with_ges(ldap_groups: list, username: str) -> list:
+def check_pre_validation_with_ges(api_key: str, normalized_groups: list, username: str) -> dict:
     """
-    Merge LDAP/File groups with GES roles
+    Enhanced pre-validation with GES namespace support
     
     Args:
-        ldap_groups: Groups from LDAP or file authentication
-        username: Username for GES lookup
+        api_key: The API key to validate
+        normalized_groups: User's normalized groups
+        username: The username
         
     Returns:
-        Combined list of groups and roles
-    """
-    # Get normalized groups from LDAP/file
-    normalized_ldap_groups = extract_group_cn(ldap_groups)
-    
-    # Get GES roles
-    ges_roles = get_ges_roles(username)
-    
-    # Combine and remove duplicates
-    all_groups = list(set(normalized_ldap_groups + ges_roles))
-    
-    logger.info(f"Merged groups for {username}: LDAP/File={normalized_ldap_groups}, GES={ges_roles}, Combined={all_groups}")
-    
-    return all_groups
-
-def check_pre_validation(api_key: str, normalized_groups: list) -> dict:
-    """
-    Check if the user meets the pre-validation requirements for the API key
+        Dict with validation result
     """
     try:
         api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
@@ -206,11 +197,31 @@ def check_pre_validation(api_key: str, normalized_groups: list) -> dict:
         with open(api_key_file, 'r') as f:
             api_key_config = yaml.safe_load(f)
         
+        # Check for namespace-based validation
+        required_namespace = api_key_config.get('claims', {}).get('static', {}).get('ges_namespace')
         required_group = api_key_config.get('pre_validation_check')
+        
+        # If API key requires a specific namespace, validate namespace access
+        if required_namespace and GES_INTEGRATION_AVAILABLE:
+            namespace_validation = validate_namespace_membership(username, required_namespace)
+            
+            if not namespace_validation.get("valid", False):
+                return {
+                    "valid": False,
+                    "message": namespace_validation.get("message", f"Namespace access denied for {required_namespace}"),
+                    "required_namespace": required_namespace,
+                    "validation_type": "namespace"
+                }
+            
+            logger.info(f"User {username} has access to required namespace: {required_namespace}")
+        
+        # Continue with group-based validation if required
         if not required_group:
             return {
                 "valid": True,
-                "message": "No pre-validation required"
+                "message": "No pre-validation required",
+                "ges_namespace": required_namespace,
+                "validation_type": "none"
             }
         
         required_group_normalized = required_group.lower()
@@ -220,18 +231,22 @@ def check_pre_validation(api_key: str, normalized_groups: list) -> dict:
             return {
                 "valid": True,
                 "message": f"User has access to required group: {required_group}",
-                "required_group": required_group
+                "required_group": required_group,
+                "ges_namespace": required_namespace,
+                "validation_type": "group"
             }
         else:
             return {
                 "valid": False,
                 "message": f"User does not have access to required group: {required_group}",
                 "required_group": required_group,
-                "user_groups": normalized_groups
+                "user_groups": normalized_groups,
+                "ges_namespace": required_namespace,
+                "validation_type": "group"
             }
             
     except Exception as e:
-        logger.error(f"Error during pre-validation check: {str(e)}")
+        logger.error(f"Error during GES pre-validation check: {str(e)}")
         return {
             "valid": False,
             "message": f"Error during validation: {str(e)}"
@@ -262,36 +277,48 @@ def login():
             error_message = user_data["error"]
         return jsonify({"error": error_message}), 401
     
-    # Merge LDAP/File groups with GES roles
     raw_groups = user_data.get("groups", [])
-    all_groups = merge_groups_with_ges(raw_groups, username)
-    
-    # Create user context for dynamic claims processing
+    normalized_groups = extract_group_cn(raw_groups)
+
+    # Create base user context
     user_context = {
         "user_id": username,
         "email": user_data.get("email", ""),
-        "groups": all_groups,  # Use merged groups
+        "groups": normalized_groups,
         "roles": user_data.get("roles", []),
-        "team_id": get_team_id_from_user(username, user_data),
-        "ges_roles": get_ges_roles(username)  # Add GES roles separately for reference
+        "team_id": get_team_id_from_user(username, user_data)
     }
 
     # If an API key was provided, check pre-validation and get additional claims
+    api_key_namespace = None
     if api_key:
-        validation_result = check_pre_validation(api_key, all_groups)
+        # Enhanced pre-validation with GES namespace support
+        validation_result = check_pre_validation_with_ges(api_key, normalized_groups, username)
         if not validation_result["valid"]:
             return jsonify({
                 "error": validation_result["message"],
-                "required_group": validation_result.get("required_group")
+                "required_group": validation_result.get("required_group"),
+                "required_namespace": validation_result.get("ges_namespace"),
+                "validation_type": validation_result.get("validation_type")
             }), 403
         
+        api_key_namespace = validation_result.get("ges_namespace")
+        
+        # Enhanced user context with namespace info
         user_context = {
             "user_id": username,
             "team_id": get_team_id_from_user(username, user_data),
-            "groups": all_groups,  # Use merged groups for dynamic claims
+            "groups": normalized_groups,
             "api_key_id": api_key,
-            "ges_roles": get_ges_roles(username)
+            "ges_namespace": api_key_namespace  # Add namespace to context
         }
+        
+        # Get GES roles for the namespace if specified
+        if api_key_namespace:
+            ges_roles = get_ges_roles_for_namespace(username, api_key_namespace)
+            user_context["ges_roles"] = ges_roles
+            user_context["roles"] = user_context.get("roles", []) + ges_roles
+        
         logger.info(f"Processing API key with user_context: {user_context}")
         api_key_claims = get_additional_claims(api_key, user_context)
     else:
@@ -299,16 +326,12 @@ def login():
 
     # Log which API key is being used
     if api_key:
-        logger.info(f"Using provided API key: {api_key}")
+        logger.info(f"Using provided API key: {api_key}, Namespace: {api_key_namespace}")
     else:
         logger.info("No API key provided, using base API key")
 
     # Merge user data with additional claims
     claims = {**user_data, **api_key_claims}
-    
-    # Replace groups with merged groups (LDAP + GES)
-    claims['groups'] = all_groups
-    claims['ges_roles'] = user_context.get('ges_roles', [])
     
     # Get expiration time from API key configuration if available
     expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]
@@ -316,6 +339,11 @@ def login():
         expires_delta = timedelta(hours=claims['exp_hours'])
         logger.info(f"Using custom expiration time from API key: {claims['exp_hours']} hours")
         claims.pop('exp_hours')
+    
+    # Add GES namespace information to claims
+    if api_key_namespace:
+        claims['ges_namespace'] = api_key_namespace
+        claims['ges_roles'] = user_context.get('ges_roles', [])
     
     # If custom secret is provided, use it with PyJWT directly
     if custom_secret:
@@ -353,13 +381,18 @@ def login():
         access_token = jwt.encode(access_payload, custom_secret, algorithm=algorithm)
         refresh_token = jwt.encode(refresh_payload, custom_secret, algorithm=algorithm)
         
-        return jsonify({
+        response_data = {
             "access_token": access_token,
             "refresh_token": refresh_token,
             "note": "Tokens generated with custom secret",
             "ges_enabled": GES_ENABLED,
-            "ges_roles": user_context.get('ges_roles', [])
-        }), 200
+            "ges_namespace": api_key_namespace
+        }
+        
+        if api_key_namespace:
+            response_data["ges_roles"] = user_context.get('ges_roles', [])
+        
+        return jsonify(response_data), 200
     else:
         # Standard token creation with application secret
         access_token = create_access_token(
@@ -370,35 +403,34 @@ def login():
         )
         refresh_token = create_refresh_token(identity=username, additional_claims=claims)
         
-        return jsonify({
+        response_data = {
             "access_token": access_token, 
             "refresh_token": refresh_token,
             "ges_enabled": GES_ENABLED,
-            "ges_roles": user_context.get('ges_roles', [])
-        }), 200
+            "ges_namespace": api_key_namespace
+        }
+        
+        if api_key_namespace:
+            response_data["ges_roles"] = user_context.get('ges_roles', [])
+        
+        return jsonify(response_data), 200
 
 def get_team_id_from_user(username, user_data):
     """
     Determine the team ID from the user's data including GES roles
     """
-    # Get all groups (LDAP + GES)
-    raw_groups = user_data.get("groups", [])
-    all_groups = merge_groups_with_ges(raw_groups, username)
+    groups = user_data.get("groups", [])
     
-    # Check for team assignments in combined groups
-    if "administrators" in all_groups or "admins" in all_groups:
+    if "administrators" in groups or "admins" in groups:
         return "admin-team"
-    elif "ai-team" in all_groups or "ai_team" in all_groups:
+    elif "ai-team" in groups:
         return "ai-team"
-    elif "ml-team" in all_groups or "ml_team" in all_groups:
+    elif "ml-team" in groups:
         return "ml-team"
-    elif "ges-admin" in all_groups or "ges_admin" in all_groups:
-        return "ges-admin-team"
     
-    # Default team
     return "general-users"
 
-# Add GES status endpoint
+# GES Management Endpoints
 @app.route('/ges/status', methods=['GET'])
 @jwt_required()
 def ges_status():
@@ -410,14 +442,14 @@ def ges_status():
     status_info = {
         "ges_enabled": GES_ENABLED,
         "ges_available": GES_AVAILABLE,
-        "ges_service_initialized": ges_service is not None,
-        "current_user": current_user
+        "ges_integration_available": GES_INTEGRATION_AVAILABLE,
+        "current_user": current_user,
+        "configured_namespace": GES_NAMESPACE
     }
     
-    if GES_ENABLED and ges_service:
+    if GES_ENABLED and hasattr(app, 'ges_service') and app.ges_service is not None:
         try:
-            # Try to get current user's GES roles to test connectivity
-            user_roles = get_ges_roles(current_user)
+            user_roles = get_ges_roles_for_namespace(current_user)
             status_info["user_ges_roles"] = user_roles
             status_info["connection_status"] = "healthy"
         except Exception as e:
@@ -425,34 +457,66 @@ def ges_status():
     
     return jsonify(status_info), 200
 
-@app.route('/ges/roles/<username>', methods=['GET'])
+@app.route('/ges/namespaces', methods=['GET'])
 @jwt_required()
-def get_user_ges_roles(username):
+def get_ges_namespaces():
     """
-    Get GES roles for a specific user (admin only)
+    Get available GES namespaces for the current user
     """
-    # Check if user has admin privileges
-    claims = get_jwt()
-    groups = claims.get('groups', [])
+    current_user = get_jwt_identity()
     
-    if 'administrators' not in groups and 'admins' not in groups:
-        return jsonify({"error": "Administrator access required"}), 403
+    if not GES_ENABLED:
+        return jsonify({"error": "GES service not enabled"}), 503
     
-    if not GES_ENABLED or not ges_service:
-        return jsonify({"error": "GES service not available"}), 503
+    # This would typically come from GES API - for now returning configured namespace
+    namespaces = [GES_NAMESPACE]
+    
+    # Add any additional namespaces from API keys that user has access to
+    api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+    if os.path.exists(api_keys_dir):
+        for key_file in glob.glob(os.path.join(api_keys_dir, "*.yaml")):
+            try:
+                with open(key_file, 'r') as f:
+                    key_data = yaml.safe_load(f)
+                    namespace = key_data.get('claims', {}).get('static', {}).get('ges_namespace')
+                    if namespace and namespace not in namespaces:
+                        # Check if user has access to this namespace
+                        roles = get_ges_roles_for_namespace(current_user, namespace)
+                        if roles:
+                            namespaces.append(namespace)
+            except Exception as e:
+                logger.error(f"Error reading API key file {key_file}: {str(e)}")
+    
+    return jsonify({
+        "username": current_user,
+        "available_namespaces": namespaces,
+        "default_namespace": GES_NAMESPACE
+    }), 200
+
+@app.route('/ges/roles/<namespace>', methods=['GET'])
+@jwt_required()
+def get_namespace_roles(namespace):
+    """
+    Get GES roles for current user in a specific namespace
+    """
+    current_user = get_jwt_identity()
+    
+    if not GES_ENABLED:
+        return jsonify({"error": "GES service not enabled"}), 503
     
     try:
-        roles = ges_service.get_roles(username)
+        roles = get_ges_roles_for_namespace(current_user, namespace)
         return jsonify({
-            "username": username,
+            "username": current_user,
+            "namespace": namespace,
             "ges_roles": roles,
             "timestamp": datetime.now().isoformat()
         }), 200
     except Exception as e:
-        logger.error(f"Error getting GES roles for {username}: {str(e)}")
+        logger.error(f"Error getting GES roles for {current_user} in namespace {namespace}: {str(e)}")
         return jsonify({"error": f"Failed to get GES roles: {str(e)}"}), 500
 
-# The rest of your existing endpoints remain the same...
+# Existing endpoints remain the same...
 @app.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
 def refresh():
@@ -468,7 +532,7 @@ def refresh():
         additional_claims=additional_claims
     )
     
-    logger.info(f"Refreshing token for user {current_user} with claims: {additional_claims}")
+    logger.info(f"Refreshing token for user {current_user}")
     
     return jsonify(access_token=access_token), 200
 
@@ -486,9 +550,15 @@ def validate_token():
 @jwt_required()
 def protected():
     current_user = get_jwt_identity()
-    return jsonify(logged_in_as=current_user), 200
-
-# ... rest of your existing endpoints ...
+    jwt_claims = get_jwt()
+    
+    response_data = {
+        "logged_in_as": current_user,
+        "ges_namespace": jwt_claims.get('ges_namespace'),
+        "ges_roles": jwt_claims.get('ges_roles', [])
+    }
+    
+    return jsonify(response_data), 200
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
