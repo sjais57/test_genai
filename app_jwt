@@ -1,0 +1,494 @@
+import os
+import re
+from datetime import timedelta, datetime
+from flask import Flask, jsonify, request, make_response, render_template, send_from_directory
+from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity, decode_token, get_jwt
+)
+from dotenv import load_dotenv
+import logging
+import pathlib
+import yaml
+import uuid
+import glob
+from flask_swagger_ui import get_swaggerui_blueprint
+from swagger_config import get_swagger_dict, get_swagger_json, get_swagger_yaml
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Import authentication methods
+from auth.file_auth import authenticate_file
+from auth.ldap_auth import authenticate_ldap, LDAP_AVAILABLE
+from utils.api_key import get_additional_claims, BASE_API_KEY_FILE
+
+# GES Integration
+try:
+    from ges_entitylements.security import EntitlementsService
+    GES_AVAILABLE = True
+    logger.info("GES integration available")
+except ImportError:
+    GES_AVAILABLE = False
+    logger.warning("GES integration not available - install ges_entitylements package")
+
+# Ensure the templates directory exists
+templates_dir = pathlib.Path(__file__).parent / 'templates'
+templates_dir.mkdir(exist_ok=True)
+
+# Initialize Flask app
+app = Flask(__name__, 
+            template_folder=str(templates_dir))
+
+# Configure Swagger UI
+SWAGGER_URL = '/dspai-docs'
+API_URL = '/swagger.json'
+
+swaggerui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={
+        'app_name': "JWT Auth API Documentation",
+        'deepLinking': True,
+        'defaultModelsExpandDepth': 2,
+        'defaultModelExpandDepth': 2,
+    }
+)
+
+app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+
+@app.route('/swagger.json')
+def swagger_json():
+    return get_swagger_json()
+
+@app.route('/swagger.yaml')
+def swagger_yaml():
+    return get_swagger_yaml()
+
+# Configure Flask-JWT-Extended
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-secret-key")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=1)
+app.config["JWT_REFRESH_TOKEN_EXPIRES"] = timedelta(days=30)
+
+# Authentication method
+AUTH_METHOD = os.getenv("AUTH_METHOD", "file")
+
+# GES Configuration
+GES_ENABLED = os.getenv("GES_ENABLED", "false").lower() == "true"
+GES_HOSTNAME = os.getenv("GES_HOSTNAME")
+GES_PORT = int(os.getenv("GES_PORT", "8080"))
+GES_NAMESPACE = os.getenv("GES_NAMESPACE", "default")
+GES_CLIENT_ID = os.getenv("GES_CLIENT_ID")
+GES_CLIENT_KEY = os.getenv("GES_CLIENT_KEY")
+
+# Whether to always include base API key claims
+ALWAYS_USE_BASE_CLAIMS = os.getenv("ALWAYS_USE_BASE_CLAIMS", "true").lower() == "true"
+
+# Check if LDAP is requested but not available
+if AUTH_METHOD == "ldap" and not LDAP_AVAILABLE:
+    logger.warning("LDAP authentication method selected but python-ldap is not installed.")
+    logger.warning("Falling back to file-based authentication.")
+    AUTH_METHOD = "file"
+
+# Initialize GES service if enabled
+ges_service = None
+if GES_ENABLED and GES_AVAILABLE:
+    if all([GES_HOSTNAME, GES_CLIENT_ID, GES_CLIENT_KEY]):
+        try:
+            ges_service = EntitlementsService(
+                hostname=GES_HOSTNAME,
+                port=GES_PORT,
+                namespace=GES_NAMESPACE,
+                client_id=GES_CLIENT_ID,
+                client_key=GES_CLIENT_KEY
+            )
+            logger.info("GES service initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize GES service: {str(e)}")
+            ges_service = None
+    else:
+        logger.warning("GES enabled but missing required configuration (hostname, client_id, client_key)")
+        GES_ENABLED = False
+
+jwt = JWTManager(app)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+def extract_group_cn(groups):
+    """
+    Extract group common names from LDAP group data
+    """
+    result = []
+    for g in (groups or []):
+        if isinstance(g, dict):
+            cn = g.get('cn') or g.get('name') or g.get('uid') or ''
+            if cn:
+                result.append(cn.lower())
+        elif isinstance(g, str):
+            m = re.search(r'cn=([^,]+)', g, flags=re.I)
+            result.append((m.group(1) if m else g).lower())
+    seen, ordered = set(), []
+    for n in result:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+def get_ges_roles(username: str) -> list:
+    """
+    Get roles from GES service for a user
+    
+    Args:
+        username: The username to get roles for
+        
+    Returns:
+        List of roles from GES
+    """
+    if not GES_ENABLED or not ges_service:
+        logger.debug("GES not enabled or service not available")
+        return []
+    
+    try:
+        roles = ges_service.get_roles(username)
+        logger.info(f"Retrieved GES roles for {username}: {roles}")
+        return roles
+    except Exception as e:
+        logger.error(f"Error getting GES roles for {username}: {str(e)}")
+        return []
+
+def merge_groups_with_ges(ldap_groups: list, username: str) -> list:
+    """
+    Merge LDAP/File groups with GES roles
+    
+    Args:
+        ldap_groups: Groups from LDAP or file authentication
+        username: Username for GES lookup
+        
+    Returns:
+        Combined list of groups and roles
+    """
+    # Get normalized groups from LDAP/file
+    normalized_ldap_groups = extract_group_cn(ldap_groups)
+    
+    # Get GES roles
+    ges_roles = get_ges_roles(username)
+    
+    # Combine and remove duplicates
+    all_groups = list(set(normalized_ldap_groups + ges_roles))
+    
+    logger.info(f"Merged groups for {username}: LDAP/File={normalized_ldap_groups}, GES={ges_roles}, Combined={all_groups}")
+    
+    return all_groups
+
+def check_pre_validation(api_key: str, normalized_groups: list) -> dict:
+    """
+    Check if the user meets the pre-validation requirements for the API key
+    """
+    try:
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+        
+        if not os.path.exists(api_key_file):
+            return {
+                "valid": False,
+                "message": "Invalid API key"
+            }
+        
+        with open(api_key_file, 'r') as f:
+            api_key_config = yaml.safe_load(f)
+        
+        required_group = api_key_config.get('pre_validation_check')
+        if not required_group:
+            return {
+                "valid": True,
+                "message": "No pre-validation required"
+            }
+        
+        required_group_normalized = required_group.lower()
+        user_has_access = required_group_normalized in [group.lower() for group in normalized_groups]
+        
+        if user_has_access:
+            return {
+                "valid": True,
+                "message": f"User has access to required group: {required_group}",
+                "required_group": required_group
+            }
+        else:
+            return {
+                "valid": False,
+                "message": f"User does not have access to required group: {required_group}",
+                "required_group": required_group,
+                "user_groups": normalized_groups
+            }
+            
+    except Exception as e:
+        logger.error(f"Error during pre-validation check: {str(e)}")
+        return {
+            "valid": False,
+            "message": f"Error during validation: {str(e)}"
+        }
+
+@app.route('/token', methods=['POST'])
+def login():
+    if not request.is_json:
+        return jsonify({"error": "Missing JSON in request"}), 400
+
+    username = request.json.get('username', None)
+    password = request.json.get('password', None)
+    api_key = request.json.get('api_key', None)
+    custom_secret = request.json.get('secret', None)
+
+    if not username or not password:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    # Authenticate based on the configured method
+    if AUTH_METHOD == "ldap":
+        authenticated, user_data = authenticate_ldap(username, password)
+    else:
+        authenticated, user_data = authenticate_file(username, password)
+
+    if not authenticated:
+        error_message = "Invalid username or password"
+        if "error" in user_data:
+            error_message = user_data["error"]
+        return jsonify({"error": error_message}), 401
+    
+    # Merge LDAP/File groups with GES roles
+    raw_groups = user_data.get("groups", [])
+    all_groups = merge_groups_with_ges(raw_groups, username)
+    
+    # Create user context for dynamic claims processing
+    user_context = {
+        "user_id": username,
+        "email": user_data.get("email", ""),
+        "groups": all_groups,  # Use merged groups
+        "roles": user_data.get("roles", []),
+        "team_id": get_team_id_from_user(username, user_data),
+        "ges_roles": get_ges_roles(username)  # Add GES roles separately for reference
+    }
+
+    # If an API key was provided, check pre-validation and get additional claims
+    if api_key:
+        validation_result = check_pre_validation(api_key, all_groups)
+        if not validation_result["valid"]:
+            return jsonify({
+                "error": validation_result["message"],
+                "required_group": validation_result.get("required_group")
+            }), 403
+        
+        user_context = {
+            "user_id": username,
+            "team_id": get_team_id_from_user(username, user_data),
+            "groups": all_groups,  # Use merged groups for dynamic claims
+            "api_key_id": api_key,
+            "ges_roles": get_ges_roles(username)
+        }
+        logger.info(f"Processing API key with user_context: {user_context}")
+        api_key_claims = get_additional_claims(api_key, user_context)
+    else:
+        api_key_claims = get_additional_claims(None, user_context)
+
+    # Log which API key is being used
+    if api_key:
+        logger.info(f"Using provided API key: {api_key}")
+    else:
+        logger.info("No API key provided, using base API key")
+
+    # Merge user data with additional claims
+    claims = {**user_data, **api_key_claims}
+    
+    # Replace groups with merged groups (LDAP + GES)
+    claims['groups'] = all_groups
+    claims['ges_roles'] = user_context.get('ges_roles', [])
+    
+    # Get expiration time from API key configuration if available
+    expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]
+    if 'exp_hours' in claims:
+        expires_delta = timedelta(hours=claims['exp_hours'])
+        logger.info(f"Using custom expiration time from API key: {claims['exp_hours']} hours")
+        claims.pop('exp_hours')
+    
+    # If custom secret is provided, use it with PyJWT directly
+    if custom_secret:
+        import jwt
+        import datetime as dt
+        
+        logger.info(f"Using custom secret for token generation")
+        
+        now = dt.datetime.now(dt.timezone.utc)
+        access_token_exp = now + expires_delta
+        refresh_token_exp = now + app.config["JWT_REFRESH_TOKEN_EXPIRES"]
+        
+        access_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": access_token_exp,
+            "sub": username,
+            "type": "access",
+            "fresh": True,
+            **claims
+        }
+        
+        refresh_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": refresh_token_exp,
+            "sub": username,
+            "type": "refresh",
+            **claims
+        }
+        
+        algorithm = app.config.get('JWT_ALGORITHM', 'HS256')
+        access_token = jwt.encode(access_payload, custom_secret, algorithm=algorithm)
+        refresh_token = jwt.encode(refresh_payload, custom_secret, algorithm=algorithm)
+        
+        return jsonify({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "note": "Tokens generated with custom secret",
+            "ges_enabled": GES_ENABLED,
+            "ges_roles": user_context.get('ges_roles', [])
+        }), 200
+    else:
+        # Standard token creation with application secret
+        access_token = create_access_token(
+            identity=username, 
+            additional_claims=claims,
+            expires_delta=expires_delta,
+            fresh=True
+        )
+        refresh_token = create_refresh_token(identity=username, additional_claims=claims)
+        
+        return jsonify({
+            "access_token": access_token, 
+            "refresh_token": refresh_token,
+            "ges_enabled": GES_ENABLED,
+            "ges_roles": user_context.get('ges_roles', [])
+        }), 200
+
+def get_team_id_from_user(username, user_data):
+    """
+    Determine the team ID from the user's data including GES roles
+    """
+    # Get all groups (LDAP + GES)
+    raw_groups = user_data.get("groups", [])
+    all_groups = merge_groups_with_ges(raw_groups, username)
+    
+    # Check for team assignments in combined groups
+    if "administrators" in all_groups or "admins" in all_groups:
+        return "admin-team"
+    elif "ai-team" in all_groups or "ai_team" in all_groups:
+        return "ai-team"
+    elif "ml-team" in all_groups or "ml_team" in all_groups:
+        return "ml-team"
+    elif "ges-admin" in all_groups or "ges_admin" in all_groups:
+        return "ges-admin-team"
+    
+    # Default team
+    return "general-users"
+
+# Add GES status endpoint
+@app.route('/ges/status', methods=['GET'])
+@jwt_required()
+def ges_status():
+    """
+    Get GES service status and configuration
+    """
+    current_user = get_jwt_identity()
+    
+    status_info = {
+        "ges_enabled": GES_ENABLED,
+        "ges_available": GES_AVAILABLE,
+        "ges_service_initialized": ges_service is not None,
+        "current_user": current_user
+    }
+    
+    if GES_ENABLED and ges_service:
+        try:
+            # Try to get current user's GES roles to test connectivity
+            user_roles = get_ges_roles(current_user)
+            status_info["user_ges_roles"] = user_roles
+            status_info["connection_status"] = "healthy"
+        except Exception as e:
+            status_info["connection_status"] = f"error: {str(e)}"
+    
+    return jsonify(status_info), 200
+
+@app.route('/ges/roles/<username>', methods=['GET'])
+@jwt_required()
+def get_user_ges_roles(username):
+    """
+    Get GES roles for a specific user (admin only)
+    """
+    # Check if user has admin privileges
+    claims = get_jwt()
+    groups = claims.get('groups', [])
+    
+    if 'administrators' not in groups and 'admins' not in groups:
+        return jsonify({"error": "Administrator access required"}), 403
+    
+    if not GES_ENABLED or not ges_service:
+        return jsonify({"error": "GES service not available"}), 503
+    
+    try:
+        roles = ges_service.get_roles(username)
+        return jsonify({
+            "username": username,
+            "ges_roles": roles,
+            "timestamp": datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting GES roles for {username}: {str(e)}")
+        return jsonify({"error": f"Failed to get GES roles: {str(e)}"}), 500
+
+# The rest of your existing endpoints remain the same...
+@app.route('/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    current_user = get_jwt_identity()
+    jwt_claims = get_jwt()
+    
+    reserved_claims = ['exp', 'iat', 'nbf', 'jti', 'type', 'fresh']
+    additional_claims = {key: value for key, value in jwt_claims.items() 
+                         if key not in reserved_claims}
+    
+    access_token = create_access_token(
+        identity=current_user,
+        additional_claims=additional_claims
+    )
+    
+    logger.info(f"Refreshing token for user {current_user} with claims: {additional_claims}")
+    
+    return jsonify(access_token=access_token), 200
+
+@app.route('/decode', methods=['POST'])
+def decode():
+    # ... existing decode implementation ...
+    pass
+
+@app.route('/validate', methods=['POST'])
+def validate_token():
+    # ... existing validate implementation ...
+    pass
+
+@app.route('/protected', methods=['GET'])
+@jwt_required()
+def protected():
+    current_user = get_jwt_identity()
+    return jsonify(logged_in_as=current_user), 200
+
+# ... rest of your existing endpoints ...
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
