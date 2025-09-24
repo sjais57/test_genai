@@ -1,0 +1,148 @@
+import os
+import logging
+from typing import Dict, List, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+try:
+    from ges_entitylements.security import EntitlementsService
+    GES_AVAILABLE = True
+except ImportError:
+    GES_AVAILABLE = False
+    logger.warning("GES package not available")
+
+class GESNamespaceManager:
+    def __init__(self):
+        self.ges_service = None
+        self._initialize_ges_service()
+    
+    def _initialize_ges_service(self):
+        """Initialize GES service if configuration is available"""
+        if not GES_AVAILABLE:
+            return
+            
+        try:
+            hostname = os.getenv('GES_HOSTNAME')
+            client_id = os.getenv('GES_CLIENT_ID')
+            client_key = os.getenv('GES_CLIENT_KEY')
+            
+            if all([hostname, client_id, client_key]):
+                self.ges_service = EntitlementsService(
+                    hostname=hostname,
+                    port=int(os.getenv('GES_PORT', '8080')),
+                    namespace=os.getenv('GES_NAMESPACE', 'default'),
+                    client_id=client_id,
+                    client_key=client_key
+                )
+                logger.info("GES service initialized successfully")
+            else:
+                logger.warning("GES configuration incomplete")
+        except Exception as e:
+            logger.error(f"Failed to initialize GES service: {str(e)}")
+    
+    def get_namespace_roles(self, username: str, namespace: str) -> List[str]:
+        """
+        Get user roles from a specific GES namespace
+        """
+        if not self.ges_service or not GES_AVAILABLE:
+            logger.warning("GES service not available")
+            return []
+        
+        try:
+            # For simplicity, using the same service but would need namespace switching
+            # In real implementation, you might need to reinitialize for different namespaces
+            roles = self.ges_service.get_roles(username)
+            logger.info(f"Retrieved roles for {username}: {roles}")
+            return roles
+            
+        except Exception as e:
+            logger.error(f"Error getting roles for {username}: {str(e)}")
+            return []
+    
+    def has_namespace_access(self, username: str, namespace: str, required_roles: List[str] = None) -> bool:
+        """
+        Check if user has access to a specific namespace
+        """
+        roles = self.get_namespace_roles(username, namespace)
+        
+        if not roles:
+            return False
+        
+        if required_roles:
+            return any(role in required_roles for role in roles)
+        
+        return True
+
+# Global instance
+ges_manager = GESNamespaceManager()
+
+def validate_namespace_membership(username: str, namespace: str, required_role: str = None) -> Dict[str, Any]:
+    """
+    Validate user membership in a namespace for pre-validation checks
+    """
+    if not GES_AVAILABLE or not ges_manager.ges_service:
+        return {
+            "valid": False,
+            "message": "GES service not available",
+            "has_access": False
+        }
+    
+    roles = ges_manager.get_namespace_roles(username, namespace)
+    
+    if not roles:
+        return {
+            "valid": False,
+            "message": f"User {username} has no access to namespace {namespace}",
+            "has_access": False,
+            "roles": []
+        }
+    
+    if required_role and required_role not in roles:
+        return {
+            "valid": False,
+            "message": f"User {username} missing required role {required_role} in namespace {namespace}",
+            "has_access": True,
+            "roles": roles,
+            "missing_role": required_role
+        }
+    
+    return {
+        "valid": True,
+        "message": f"User {username} has access to namespace {namespace}",
+        "has_access": True,
+        "roles": roles,
+        "has_required_role": required_role in roles if required_role else True
+    }
+
+def get_namespace_roles(username: str, namespace: str, **kwargs) -> List[str]:
+    """
+    Dynamic claim function to get user roles in a specific namespace
+    """
+    return ges_manager.get_namespace_roles(username, namespace)
+
+def get_namespace_permissions(username: str, namespace: str, user_roles: List[str] = None, **kwargs) -> Dict[str, Any]:
+    """
+    Dynamic claim function to get namespace-based permissions
+    """
+    if user_roles is None:
+        user_roles = ges_manager.get_namespace_roles(username, namespace)
+    
+    permissions = {
+        "has_access": len(user_roles) > 0,
+        "roles": user_roles,
+        "namespace": namespace,
+        "is_namespace_admin": any("admin" in role.lower() for role in user_roles),
+        "can_read": len(user_roles) > 0,
+        "can_write": any("write" in role.lower() or "admin" in role.lower() for role in user_roles),
+        "can_manage": any("admin" in role.lower() or "manage" in role.lower() for role in user_roles),
+    }
+    
+    # Add resource quotas based on roles
+    if any("premium" in role.lower() for role in user_roles):
+        permissions["resource_limits"] = {"max_models": 10, "max_requests": 1000}
+    elif any("standard" in role.lower() for role in user_roles):
+        permissions["resource_limits"] = {"max_models": 5, "max_requests": 500}
+    else:
+        permissions["resource_limits"] = {"max_models": 3, "max_requests": 200}
+    
+    return permissions
