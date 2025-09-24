@@ -1,0 +1,289 @@
+import os
+import yaml
+import json
+import logging
+import importlib
+import requests
+import datetime
+from typing import Dict, Any, Optional, Callable, Union, Tuple
+from datetime import datetime, timedelta
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Define the name of the base API key file
+BASE_API_KEY_FILE = "base_api_key.yaml"
+
+# GES Integration
+try:
+    from ges_entitylements.security import EntitlementsService
+    GES_AVAILABLE = True
+except ImportError:
+    GES_AVAILABLE = False
+
+def get_ges_roles(username: str, ges_config: Dict[str, Any] = None) -> list:
+    """
+    Get roles from GES service for dynamic claims processing
+    
+    Args:
+        username: The username to get roles for
+        ges_config: GES configuration (hostname, port, namespace, client_id, client_key)
+        
+    Returns:
+        List of roles from GES
+    """
+    if not GES_AVAILABLE or not ges_config:
+        return []
+    
+    try:
+        ges_service = EntitlementsService(
+            hostname=ges_config.get('hostname'),
+            port=ges_config.get('port', 8080),
+            namespace=ges_config.get('namespace', 'default'),
+            client_id=ges_config.get('client_id'),
+            client_key=ges_config.get('client_key')
+        )
+        roles = ges_service.get_roles(username)
+        logger.info(f"Retrieved GES roles for {username}: {roles}")
+        return roles
+    except Exception as e:
+        logger.error(f"Error getting GES roles for {username}: {str(e)}")
+        return []
+
+def get_api_key_metadata(api_key: str = None) -> Dict[str, Any]:
+    """
+    Get metadata from the API key configuration file.
+    """
+    try:
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        
+        if not os.path.exists(api_keys_dir):
+            logger.error(f"API keys directory not found: {api_keys_dir}")
+            return {}
+        
+        api_key_file = None
+        
+        if api_key:
+            specific_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+            if os.path.exists(specific_key_file):
+                api_key_file = specific_key_file
+            else:
+                logger.warning(f"Config file for API key not found: {api_key}")
+        
+        if not api_key_file:
+            base_key_file = os.path.join(api_keys_dir, BASE_API_KEY_FILE)
+            if os.path.exists(base_key_file):
+                api_key_file = base_key_file
+                logger.info("Using base API key")
+            else:
+                logger.warning(f"Base API key file not found: {BASE_API_KEY_FILE}")
+                return {}
+        
+        with open(api_key_file, 'r') as f:
+            key_data = yaml.safe_load(f)
+        
+        metadata = key_data.get('metadata', {})
+        
+        return metadata
+        
+    except Exception as e:
+        logger.error(f"Unexpected error getting API key metadata: {str(e)}")
+        return {}
+
+def get_api_key_data(api_key: str = None, user_context: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Get both claims and metadata from an API key configuration in a single call.
+    """
+    claims = get_additional_claims(api_key, user_context)
+    metadata = get_api_key_metadata(api_key)
+    
+    return {
+        "claims": claims,
+        "metadata": metadata
+    }
+
+def get_additional_claims(api_key: str = None, user_context: Dict[str, Any] = None) -> Dict:
+    """
+    Get additional claims based on the provided API key with GES support
+    """
+    try:
+        if user_context is None:
+            user_context = {}
+            
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        
+        if not os.path.exists(api_keys_dir):
+            logger.error(f"API keys directory not found: {api_keys_dir}")
+            return {}
+        
+        api_key_file = None
+        
+        if api_key:
+            specific_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+            if os.path.exists(specific_key_file):
+                api_key_file = specific_key_file
+            else:
+                logger.warning(f"Config file for API key not found: {api_key}")
+                logger.info("Falling back to base API key")
+        
+        if not api_key_file:
+            base_key_file = os.path.join(api_keys_dir, BASE_API_KEY_FILE)
+            if os.path.exists(base_key_file):
+                api_key_file = base_key_file
+                logger.info("Using base API key")
+            else:
+                logger.warning(f"Base API key file not found: {BASE_API_KEY_FILE}")
+                return {}
+        
+        with open(api_key_file, 'r') as f:
+            key_data = yaml.safe_load(f)
+        
+        static_claims = key_data.get('claims', {}).get('static', {})
+        
+        # Get GES configuration from environment for dynamic claims
+        ges_config = {
+            'hostname': os.getenv('GES_HOSTNAME'),
+            'port': int(os.getenv('GES_PORT', '8080')),
+            'namespace': os.getenv('GES_NAMESPACE', 'default'),
+            'client_id': os.getenv('GES_CLIENT_ID'),
+            'client_key': os.getenv('GES_CLIENT_KEY')
+        }
+        
+        metadata = key_data.get('metadata', {})
+        dynamic_claims = process_dynamic_claims(
+            key_data.get('claims', {}).get('dynamic', {}),
+            user_context,
+            api_key or "base_api_key",
+            key_data.get('id', ''),
+            metadata,
+            ges_config  # Pass GES configuration
+        )
+        
+        additional_claims = {**static_claims, **dynamic_claims}
+        
+        return additional_claims
+        
+    except Exception as e:
+        logger.error(f"Unexpected error getting additional claims: {str(e)}")
+        return {}
+
+def process_dynamic_claims(
+    dynamic_claims_config: Dict[str, Any],
+    user_context: Dict[str, Any],
+    api_key: str,
+    api_key_id: str,
+    metadata: Dict[str, Any] = None,
+    ges_config: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    logger.info(f"Processing dynamic claims with user_context={user_context}, api_key={api_key}, api_key_id={api_key_id}")
+    
+    if not dynamic_claims_config:
+        return {}
+    
+    result = {}
+    
+    logger.info(f"Dynamic claims config: {dynamic_claims_config}")
+    for claim_name, claim_config in dynamic_claims_config.items():
+        logger.info(f"Processing claim: {claim_name} with config: {claim_config}")
+        try:
+            claim_type = claim_config.get('type', '')
+            
+            if claim_type == 'function':
+                claim_value = execute_function_claim(claim_config, user_context, api_key, api_key_id, metadata, ges_config)
+                if claim_value:
+                    result[claim_name] = claim_value
+                    
+            elif claim_type == 'api':
+                claim_value = execute_api_claim(claim_config, user_context, api_key, api_key_id)
+                if claim_value:
+                    result[claim_name] = claim_value
+                    
+            elif claim_type == 'formula':
+                formulas = claim_config.get('formulas', {})
+                formula_claims = execute_formula_claims(formulas, user_context, result, api_key, api_key_id)
+                result.update(formula_claims)
+                    
+            else:
+                logger.warning(f"Unknown claim type: {claim_type} for claim: {claim_name}")
+                
+        except Exception as e:
+            logger.error(f"Error processing dynamic claim '{claim_name}': {str(e)}")
+    
+    logger.info(f"Final dynamic claims result: {result}")
+    return result
+
+def execute_function_claim(
+    claim_config: Dict[str, Any],
+    user_context: Dict[str, Any],
+    api_key: str,
+    api_key_id: str,
+    metadata: Dict[str, Any] = None,
+    ges_config: Dict[str, Any] = None
+) -> Optional[Any]:
+    logger.info(f"Executing function claim with config: {claim_config}")
+    
+    try:
+        module_name = claim_config.get('module')
+        function_name = claim_config.get('function')
+        
+        if not module_name or not function_name:
+            logger.error("Missing module or function name in function claim configuration")
+            return None
+        
+        module = importlib.import_module(module_name)
+        func = getattr(module, function_name)
+        
+        args = claim_config.get('args', {})
+        processed_args = {}
+        
+        for arg_name, arg_value in args.items():
+            if isinstance(arg_value, str) and arg_value.startswith('{') and arg_value.endswith('}'):
+                placeholder = arg_value[1:-1]
+                
+                if placeholder == 'api_key':
+                    processed_args[arg_name] = api_key
+                elif placeholder == 'api_key_id':
+                    processed_args[arg_name] = api_key_id
+                elif placeholder == 'ges_roles':
+                    # Special handling for GES roles
+                    username = user_context.get('user_id', '')
+                    if username and ges_config:
+                        ges_roles = get_ges_roles(username, ges_config)
+                        processed_args[arg_name] = ges_roles
+                    else:
+                        processed_args[arg_name] = []
+                else:
+                    processed_args[arg_name] = user_context.get(placeholder, '')
+            else:
+                processed_args[arg_name] = arg_value
+        
+        # Call the function with the processed arguments and metadata if available
+        if metadata is not None:
+            return func(**processed_args, metadata=metadata, ges_config=ges_config)
+        else:
+            return func(**processed_args)
+        
+    except Exception as e:
+        logger.error(f"Error executing function claim: {str(e)}")
+        return None
+
+# The rest of your existing functions remain the same...
+def execute_api_claim(
+    claim_config: Dict[str, Any],
+    user_context: Dict[str, Any],
+    api_key: str,
+    api_key_id: str
+) -> Optional[Any]:
+    # ... existing implementation ...
+    pass
+
+def execute_formula_claims(
+    formulas: Dict[str, str],
+    user_context: Dict[str, Any],
+    existing_claims: Dict[str, Any],
+    api_key: str,
+    api_key_id: str
+) -> Dict[str, Any]:
+    # ... existing implementation ...
+    pass
