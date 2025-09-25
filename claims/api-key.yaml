@@ -1,70 +1,89 @@
-# Add to your existing ak_tiered_model_exec.yaml
+# api_keys/your_api_key.yaml
+id: ak_tiered_model_exec
+owner: AI Team
+provider_permissions:
+  - openai
+  - anthropic
+  - groq
+endpoint_permissions:
+  - /v1/chat/completions
+  - /v1/embeddings
+
 claims:
   static:
-    # ... existing static claims ...
-  dynamic:
-    # ... existing dynamic claims ...
-    ges_based_claims:
-      type: function
-      module: claims.ges_claims
-      function: get_ges_based_claims
-      args:
-        username: "{user_id}"
-        api_key: "{api_key_id}"
+    key: ak_tiered_model_exec
+    tier: enterprise
+    exp_hours: 24
 
 metadata:
-  # ... existing metadata ...
-  
-  # GES Group Mappings (applied if user is in these groups in any namespace)
-  ges_group_mappings:
-    "grp_tier1":
-      tier: "gold"
-      max_models_per_request: 1000
-      can_manage_users: true
-      rate_limit: 200
-    "grp_tier2":
-      tier: "silver" 
-      max_models_per_request: 500
-      can_manage_users: false
-      rate_limit: 100
-    "powerusers":
-      tier: "gold"
-      max_models_per_request: 1000
-      can_manage_users: true
-      rate_limit: 200
-  
-  # Namespace-specific claims
-  namespace_claims:
-    "ai-namespace":
-      group_mappings:
-        "ai-admins":
-          ai_admin: true
-          model_access: ["gpt-4", "gpt-4-turbo", "claude-2"]
-        "ai-users":
-          ai_user: true
-          model_access: ["gpt-3.5-turbo", "claude-instant"]
-    "ml-namespace":
-      group_mappings:
-        "ml-researchers":
-          ml_researcher: true
-          experimental_models: true
-        "ml-users":
-          ml_user: true
-          model_access: ["stable-diffusion", "llama2"]
-  
-  # GES Pre-validation configuration
-  ges_pre_validation:
-    required_groups:
-      - "active-user"
-      - "api-access"
-    required_namespace_groups:
-      "ai-namespace":
-        - "ai-users"
-      "ml-namespace":
-        - "ml-users"
-  
+  # GES Namespace configurations - namespaces and their group claims
+  ges_namespaces:
+    # Namespace 1: AI Models Access
+    "ai-models-namespace":
+      description: "Controls access to AI models"
+      group_claims:
+        "gpt-4-access":
+          models: ["gpt-4", "gpt-4-turbo", "gpt-4-vision"]
+          max_tokens: 8192
+          rate_limit: 100
+        "gpt-3-access":
+          models: ["gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+          max_tokens: 4096
+          rate_limit: 200
+        "claude-access":
+          models: ["claude-2", "claude-instant"]
+          max_tokens: 4096
+          rate_limit: 150
+
+    # Namespace 2: Inference Capabilities
+    "inference-namespace":
+      description: "Controls inference capabilities"
+      group_claims:
+        "batch-inference":
+          batch_processing: true
+          max_batch_size: 1000
+          async_operations: true
+        "real-time-inference":
+          real_time: true
+          max_concurrent: 10
+          low_latency: true
+
+    # Namespace 3: RAG Features
+    "rag-namespace":
+      description: "Controls RAG capabilities"
+      group_claims:
+        "vector-search":
+          vector_search: true
+          max_vectors: 100000
+          similarity_threshold: 0.8
+        "document-processing":
+          document_processing: true
+          max_file_size: 100MB
+          supported_formats: ["pdf", "docx", "txt"]
+        "knowledge-base-admin":
+          kb_admin: true
+          can_create_kb: true
+          can_delete_kb: true
+
+    # Namespace 4: Experimental Features
+    "experimental-namespace":
+      description: "Controls access to experimental features"
+      group_claims:
+        "beta-features":
+          experimental: true
+          beta_features: ["voice_synthesis", "video_analysis"]
+          early_access: true
+
+  # GES Access Validation
+  ges_validation:
+    required_namespaces:
+      - "ai-models-namespace"
+      - "inference-namespace"
+    minimum_groups_required: 1
+
   # Default claims if no GES groups match
   default_claims:
+    models: ["gpt-3.5-turbo"]
+    max_tokens: 2048
+    rate_limit: 50
     tier: "basic"
-    max_models_per_request: 10
-    rate_limit: 10
