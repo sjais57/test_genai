@@ -1,0 +1,188 @@
+# claims/ges_claims.py
+import logging
+import yaml
+import os
+from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
+
+def get_ges_based_claims(username: str, api_key: str = None) -> Dict[str, Any]:
+    """
+    Get claims based on user's GES group membership across namespaces
+    
+    Args:
+        username: The username
+        api_key: Optional API key for specific configuration
+        
+    Returns:
+        Dictionary of claims based on GES group membership
+    """
+    try:
+        from ges_integration import ges_manager
+        
+        # Get user's groups from all namespaces
+        all_namespace_groups = ges_manager.get_user_groups(username)
+        all_groups = ges_manager.get_all_user_groups(username)
+        
+        logger.info(f"Processing GES claims for user {username}")
+        logger.info(f"Namespace groups: {all_namespace_groups}")
+        logger.info(f"All groups: {all_groups}")
+        
+        if not all_groups:
+            logger.warning(f"No GES groups found for user {username}")
+            return {}
+        
+        # Load API key configuration
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        
+        # Determine which API key file to use
+        api_key_file = None
+        if api_key:
+            specific_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+            if os.path.exists(specific_key_file):
+                api_key_file = specific_key_file
+            else:
+                logger.warning(f"Config file for API key not found: {api_key}")
+                return {}
+        else:
+            # Use base API key
+            base_key_file = os.path.join(api_keys_dir, "base_api_key.yaml")
+            if os.path.exists(base_key_file):
+                api_key_file = base_key_file
+            else:
+                logger.warning("Base API key file not found")
+                return {}
+        
+        # Load API key config
+        with open(api_key_file, 'r') as f:
+            key_data = yaml.safe_load(f)
+        
+        # Get GES group mappings from metadata
+        metadata = key_data.get('metadata', {})
+        ges_mappings = metadata.get('ges_group_mappings', {})
+        
+        claims = {}
+        matched_groups = []
+        
+        # Process each GES group mapping
+        for group_name, group_claims in ges_mappings.items():
+            if group_name.lower() in all_groups:
+                logger.info(f"User {username} is member of GES group {group_name}, applying claims")
+                claims.update(group_claims)
+                matched_groups.append(group_name)
+        
+        # Apply namespace-specific claims
+        namespace_claims = metadata.get('namespace_claims', {})
+        for namespace, groups in all_namespace_groups.items():
+            if namespace in namespace_claims:
+                namespace_config = namespace_claims[namespace]
+                for group_name, group_claims in namespace_config.get('group_mappings', {}).items():
+                    if group_name.lower() in groups:
+                        logger.info(f"User {username} is member of group {group_name} in namespace {namespace}, applying namespace claims")
+                        claims.update(group_claims)
+                        matched_groups.append(f"{namespace}:{group_name}")
+        
+        # Apply default claims if no specific groups matched
+        if not claims and 'default_claims' in metadata:
+            claims.update(metadata.get('default_claims', {}))
+            logger.info(f"Applying default claims for user {username}")
+        
+        # Add GES information to claims for debugging/auditing
+        claims['ges_info'] = {
+            'matched_groups': matched_groups,
+            'all_groups': all_groups,
+            'namespace_groups': all_namespace_groups
+        }
+        
+        logger.info(f"Final GES claims for user {username}: {claims}")
+        return claims
+        
+    except Exception as e:
+        logger.error(f"Error processing GES group claims: {str(e)}")
+        return {}
+
+def check_ges_pre_validation(username: str, api_key: str) -> Dict[str, Any]:
+    """
+    Check if user meets GES-based pre-validation requirements
+    
+    Args:
+        username: The username
+        api_key: API key to check validation for
+        
+    Returns:
+        Validation result dictionary
+    """
+    try:
+        from ges_integration import ges_manager
+        
+        # Load API key configuration
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+        
+        if not os.path.exists(api_key_file):
+            return {
+                "valid": False,
+                "message": "Invalid API key"
+            }
+        
+        with open(api_key_file, 'r') as f:
+            api_key_config = yaml.safe_load(f)
+        
+        # Check if GES pre-validation is required
+        ges_validation = api_key_config.get('ges_pre_validation', {})
+        if not ges_validation:
+            return {
+                "valid": True,
+                "message": "No GES pre-validation required"
+            }
+        
+        required_groups = ges_validation.get('required_groups', [])
+        required_namespace_groups = ges_validation.get('required_namespace_groups', {})
+        
+        if not required_groups and not required_namespace_groups:
+            return {
+                "valid": True,
+                "message": "No specific GES groups required"
+            }
+        
+        # Get user's GES groups
+        user_namespace_groups = ges_manager.get_user_groups(username)
+        user_all_groups = ges_manager.get_all_user_groups(username)
+        
+        # Check required groups (across all namespaces)
+        missing_groups = []
+        for group in required_groups:
+            if group.lower() not in user_all_groups:
+                missing_groups.append(group)
+        
+        # Check namespace-specific required groups
+        missing_namespace_groups = {}
+        for namespace, groups in required_namespace_groups.items():
+            user_groups_in_namespace = user_namespace_groups.get(namespace, [])
+            missing_in_namespace = []
+            for group in groups:
+                if group.lower() not in user_groups_in_namespace:
+                    missing_in_namespace.append(group)
+            if missing_in_namespace:
+                missing_namespace_groups[namespace] = missing_in_namespace
+        
+        if not missing_groups and not missing_namespace_groups:
+            return {
+                "valid": True,
+                "message": "User meets all GES validation requirements"
+            }
+        else:
+            return {
+                "valid": False,
+                "message": "User does not meet GES validation requirements",
+                "missing_groups": missing_groups,
+                "missing_namespace_groups": missing_namespace_groups,
+                "user_groups": user_all_groups
+            }
+            
+    except Exception as e:
+        logger.error(f"Error during GES pre-validation: {str(e)}")
+        return {
+            "valid": False,
+            "message": f"Error during GES validation: {str(e)}"
+        }
