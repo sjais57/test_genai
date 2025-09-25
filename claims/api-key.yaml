@@ -1,0 +1,70 @@
+# Add to your existing ak_tiered_model_exec.yaml
+claims:
+  static:
+    # ... existing static claims ...
+  dynamic:
+    # ... existing dynamic claims ...
+    ges_based_claims:
+      type: function
+      module: claims.ges_claims
+      function: get_ges_based_claims
+      args:
+        username: "{user_id}"
+        api_key: "{api_key_id}"
+
+metadata:
+  # ... existing metadata ...
+  
+  # GES Group Mappings (applied if user is in these groups in any namespace)
+  ges_group_mappings:
+    "grp_tier1":
+      tier: "gold"
+      max_models_per_request: 1000
+      can_manage_users: true
+      rate_limit: 200
+    "grp_tier2":
+      tier: "silver" 
+      max_models_per_request: 500
+      can_manage_users: false
+      rate_limit: 100
+    "powerusers":
+      tier: "gold"
+      max_models_per_request: 1000
+      can_manage_users: true
+      rate_limit: 200
+  
+  # Namespace-specific claims
+  namespace_claims:
+    "ai-namespace":
+      group_mappings:
+        "ai-admins":
+          ai_admin: true
+          model_access: ["gpt-4", "gpt-4-turbo", "claude-2"]
+        "ai-users":
+          ai_user: true
+          model_access: ["gpt-3.5-turbo", "claude-instant"]
+    "ml-namespace":
+      group_mappings:
+        "ml-researchers":
+          ml_researcher: true
+          experimental_models: true
+        "ml-users":
+          ml_user: true
+          model_access: ["stable-diffusion", "llama2"]
+  
+  # GES Pre-validation configuration
+  ges_pre_validation:
+    required_groups:
+      - "active-user"
+      - "api-access"
+    required_namespace_groups:
+      "ai-namespace":
+        - "ai-users"
+      "ml-namespace":
+        - "ml-users"
+  
+  # Default claims if no GES groups match
+  default_claims:
+    tier: "basic"
+    max_models_per_request: 10
+    rate_limit: 10
