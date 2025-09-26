@@ -1,27 +1,27 @@
 # auth/ges_integration.py
-import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict
 from ges_entitylements.security import EntitlementsService
 
 logger = logging.getLogger(__name__)
 
 class GESService:
     def __init__(self):
-        self.service = None
+        pass
         
     def get_user_groups_in_namespace(self, username: str, namespace: str) -> List[str]:
         """
-        Simple function to get user's groups in a specific namespace
+        Get user's groups in a specific namespace
+        Returns empty list if user has no groups in namespace
         """
         try:
-            # Hardcoded connection details - replace with your actual values
-            hostname = "your-ges-server.com"  # Replace with your GES hostname
-            port = 8080                       # Replace with your GES port
-            client_id = "your-client-id"      # Replace with your client ID
-            client_key = "your-client-key"    # Replace with your client key
+            # Replace with your actual GES connection details
+            hostname = "your-ges-server.com"
+            port = 8080
+            client_id = "your-client-id"
+            client_key = "your-client-key"
             
-            logger.info(f"Checking groups for user '{username}' in namespace '{namespace}'")
+            logger.info(f"Checking GES groups for user '{username}' in namespace '{namespace}'")
             
             # Create GES service instance
             ges_service = EntitlementsService(
@@ -41,24 +41,27 @@ class GESService:
             elif groups:
                 group_list = [str(groups)]
             else:
-                group_list = []
+                group_list = []  # User has no groups in this namespace
             
-            logger.info(f"User '{username}' has groups in namespace '{namespace}': {group_list}")
+            logger.info(f"User '{username}' has {len(group_list)} groups in namespace '{namespace}'")
             return group_list
             
         except Exception as e:
-            logger.error(f"Error getting groups for user '{username}' in namespace '{namespace}': {str(e)}")
-            return []
+            logger.error(f"Error getting GES groups: {str(e)}")
+            return []  # Return empty list on error
 
     def get_user_groups_in_namespaces(self, username: str, namespaces: List[str]) -> Dict[str, List[str]]:
         """
         Get user's groups across multiple namespaces
+        Only includes namespaces where user actually has groups
         """
         results = {}
         
         for namespace in namespaces:
             groups = self.get_user_groups_in_namespace(username, namespace)
-            results[namespace] = groups
+            # Only include namespace if user has groups in it
+            if groups:  # This is the key - only include if groups exist
+                results[namespace] = groups
         
         return results
 
