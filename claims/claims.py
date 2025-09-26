@@ -13,7 +13,7 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
     try:
         from auth.ges_integration import ges_service
         
-        logger.info(f"🔍 Starting GES claims processing for user '{username}' with API key '{api_key}'")
+        logger.info(f"Starting GES claims processing for user '{username}' with API key '{api_key}'")
         
         # Load API key configuration
         api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
@@ -40,15 +40,15 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
         
         # Get namespaces to check
         namespaces_to_check = list(namespace_configs.keys())
-        logger.info(f"🔍 Checking namespaces: {namespaces_to_check}")
+        logger.info(f"Checking namespaces: {namespaces_to_check}")
         
         # Get user's groups in namespaces
         user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, namespaces_to_check)
-        logger.info(f"📊 User namespace groups result: {user_namespace_groups}")
+        logger.info(f"User namespace groups result: {user_namespace_groups}")
         
         # If user has no groups in any namespace, return empty claims
         if not user_namespace_groups:
-            logger.info(f"❌ User '{username}' has no groups in any configured namespace")
+            logger.info(f"User '{username}' has no groups in any configured namespace")
             return {}
         
         claims = {}
@@ -57,8 +57,8 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
         
         # Process each namespace where user has groups
         for namespace, user_groups in user_namespace_groups.items():
-            logger.info(f"🎯 Processing namespace: {namespace}")
-            logger.info(f"   User groups: {user_groups}")
+            logger.info(f"Processing namespace: {namespace}")
+            logger.info(f"User groups: {user_groups}")
             
             group_claims_mapping = namespace_configs[namespace].get('group_claims', {})
             api_key_groups = list(group_claims_mapping.keys())
@@ -70,7 +70,7 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
             for group_name, group_claims in group_claims_mapping.items():
                 # Strategy 1: Exact match
                 if group_name in user_groups:
-                    logger.info(f"   ✅ EXACT MATCH: '{group_name}'")
+                    logger.info(f" EXACT MATCH: '{group_name}'")
                     claims.update(group_claims)
                     matched_groups.append(f"{namespace}:{group_name}")
                     matches_found = True
@@ -81,7 +81,7 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
                 if group_name.lower() in user_groups_lower:
                     # Find the actual case version that matched
                     actual_group = next((g for g in user_groups if g.lower() == group_name.lower()), None)
-                    logger.info(f"   ✅ CASE-INSENSITIVE MATCH: '{group_name}' -> '{actual_group}'")
+                    logger.info(f" CASE-INSENSITIVE MATCH: '{group_name}' -> '{actual_group}'")
                     claims.update(group_claims)
                     matched_groups.append(f"{namespace}:{actual_group}->{group_name}")
                     matches_found = True
@@ -91,7 +91,7 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
                 for user_group in user_groups:
                     if (group_name.lower() in user_group.lower() or 
                         user_group.lower() in group_name.lower()):
-                        logger.info(f"   ✅ PARTIAL MATCH: '{user_group}' contains '{group_name}'")
+                        logger.info(f" PARTIAL MATCH: '{user_group}' contains '{group_name}'")
                         claims.update(group_claims)
                         matched_groups.append(f"{namespace}:{user_group}->{group_name}")
                         matches_found = True
@@ -99,16 +99,16 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
                 
                 if not matches_found:
                     unmatched_groups.append(f"{namespace}:{group_name}")
-                    logger.info(f"   ❌ NO MATCH: '{group_name}'")
+                    logger.info(f" NO MATCH: '{group_name}'")
             
             if not matches_found:
-                logger.warning(f"   ⚠️ No group matches found in namespace '{namespace}'")
+                logger.warning(f"  No group matches found in namespace '{namespace}'")
         
         # Final results
         if claims:
-            logger.info(f"🎉 SUCCESS: Generated {len(claims)} GES claims")
-            logger.info(f"📋 Matched groups: {matched_groups}")
-            logger.info(f"🔧 Final claims keys: {list(claims.keys())}")
+            logger.info(f"SUCCESS: Generated {len(claims)} GES claims")
+            logger.info(f"Matched groups: {matched_groups}")
+            logger.info(f"Final claims keys: {list(claims.keys())}")
             
             # Add debug info (remove in production if desired)
             claims['_ges_metadata'] = {
@@ -118,12 +118,12 @@ def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
                 'timestamp': str(datetime.now())
             }
         else:
-            logger.warning(f"💔 FAILED: User has groups but no claims were generated")
+            logger.warning(f"FAILED: User has groups but no claims were generated")
             logger.info(f"User groups: {user_namespace_groups}")
             logger.info(f"API key groups: {[list(ns.get('group_claims', {}).keys()) for ns in namespace_configs.values()]}")
         
         return claims
         
     except Exception as e:
-        logger.error(f"💥 Error processing GES claims: {str(e)}", exc_info=True)
+        logger.error(f"Error processing GES claims: {str(e)}", exc_info=True)
         return {}
