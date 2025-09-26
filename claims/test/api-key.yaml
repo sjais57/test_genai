@@ -1,88 +1,18 @@
-# config/api_keys/ak_ai_team.yaml
-id: ak_ai_team
-owner: AI Team
-provider_permissions:
-  - openai
-  - anthropic
-  - groq
-
-claims:
-  static:
-    key: ak_ai_team
-    tier: enterprise
-    exp_hours: 24
+# config/api_keys/test_ges.yaml
+id: test_ges
+owner: Test User
 
 metadata:
-  # NAMESPACES DEFINED IN API KEY YAML - NOT IN CODE OR .env
   ges_namespaces:
-    # Namespace 1: AI Models Access Control
-    "ai-models-namespace":
-      description: "Controls access to AI models and capabilities"
+    "com.text.qwe.tert":
       group_claims:
-        "gpt-4-users":
-          models: ["gpt-4", "gpt-4-turbo", "gpt-4-vision"]
-          max_tokens: 8192
-          rate_limit: 1000
-        "gpt-3-users":
-          models: ["gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
-          max_tokens: 4096
-          rate_limit: 2000
-        "claude-users":
-          models: ["claude-2", "claude-instant"]
-          max_tokens: 4096
-          rate_limit: 1500
+        "ADS":
+          test_claim: "ads_user"
+          models: ["test-model"]
+        "AD.read.ASW":
+          test_claim: "read_user" 
+          models: ["test-model-2"]
 
-    # Namespace 2: Inference Capabilities  
-    "inference-namespace":
-      description: "Controls inference and processing capabilities"
-      group_claims:
-        "batch-processing":
-          batch_processing: true
-          max_batch_size: 1000
-          async_operations: true
-        "real-time-inference":
-          real_time: true
-          max_concurrent: 50
-          low_latency: true
-
-    # Namespace 3: RAG Features
-    "rag-namespace":
-      description: "Controls RAG and knowledge base features"
-      group_claims:
-        "vector-db-access":
-          vector_search: true
-          max_vectors: 1000000
-          similarity_threshold: 0.8
-        "document-processors":
-          document_processing: true
-          max_file_size: "500MB"
-          supported_formats: ["pdf", "docx", "txt", "pptx"]
-        "knowledge-base-admins":
-          kb_admin: true
-          can_create_kb: true
-          can_delete_kb: true
-          can_manage_users: true
-
-    # Namespace 4: Experimental Features
-    "experimental-namespace":
-      description: "Controls access to experimental features"
-      group_claims:
-        "beta-testers":
-          experimental: true
-          beta_features: ["voice_synthesis", "video_analysis", "multi-modal"]
-          early_access: true
-          can_provide_feedback: true
-
-  # GES Validation Rules (also defined in API key YAML)
-  ges_validation:
-    required_namespaces:
-      - "ai-models-namespace"
-      - "inference-namespace"
-    minimum_groups_required: 1
-
-  # Default claims if no GES groups match
   default_claims:
-    models: ["gpt-3.5-turbo"]
-    max_tokens: 2048
-    rate_limit: 100
-    tier: "basic"
+    test_claim: "default_user"
+    models: ["default-model"]
