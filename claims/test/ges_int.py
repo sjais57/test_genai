@@ -1,7 +1,5 @@
 # auth/ges_integration.py
 import logging
-import ast
-import json
 from typing import List, Dict
 from ges_entitylements.security import EntitlementsService
 
@@ -14,7 +12,7 @@ class GESService:
     def get_user_groups_in_namespace(self, username: str, namespace: str) -> List[str]:
         """
         Get user's groups in a specific namespace
-        Handles string representation of lists returned by GES
+        Properly handles set responses from GES
         """
         try:
             # Replace with your actual GES connection details
@@ -41,48 +39,28 @@ class GESService:
             logger.info(f"Raw GES response: {groups}")
             
             # Handle different response formats
-            if isinstance(groups, list):
-                # Already a list - perfect!
+            if isinstance(groups, (set, list)):
+                # Already a set or list - convert to list of strings
                 group_list = [str(group) for group in groups]
+                logger.info(f"Converted to list: {group_list}")
                 
             elif isinstance(groups, str):
-                # String representation of list - need to parse it
+                # String representation - try to parse it
                 groups_cleaned = groups.strip()
-                
-                # Try different parsing methods
-                if groups_cleaned.startswith('[') and groups_cleaned.endswith(']'):
-                    try:
-                        # Method 1: Use ast.literal_eval for safe parsing
-                        group_list = ast.literal_eval(groups_cleaned)
-                        group_list = [str(group) for group in group_list]
-                        logger.info("✅ Successfully parsed using ast.literal_eval")
-                        
-                    except:
-                        try:
-                            # Method 2: Use json.loads
-                            group_list = json.loads(groups_cleaned)
-                            group_list = [str(group) for group in group_list]
-                            logger.info("✅ Successfully parsed using json.loads")
-                            
-                        except:
-                            # Method 3: Manual parsing
-                            groups_cleaned = groups_cleaned[1:-1]  # Remove brackets
-                            group_list = [group.strip().strip("'\"") for group in groups_cleaned.split(',')]
-                            logger.info("✅ Successfully parsed using manual parsing")
-                
+                if (groups_cleaned.startswith('{') and groups_cleaned.endswith('}')) or \
+                   (groups_cleaned.startswith('[') and groups_cleaned.endswith(']')):
+                    # Remove braces/brackets and split
+                    inner_content = groups_cleaned[1:-1]
+                    group_list = [group.strip().strip("'\"") for group in inner_content.split(',')]
+                    logger.info(f"Parsed from string: {group_list}")
                 else:
                     # Single group as string
                     group_list = [groups_cleaned]
-                    
-            elif groups:
-                # Other type (probably single value)
-                group_list = [str(groups)]
-                
             else:
-                # Empty response
+                # Other type or None
                 group_list = []
             
-            logger.info(f"✅ Processed groups: {group_list}")
+            logger.info(f"Final processed groups: {group_list}")
             return group_list
             
         except Exception as e:
@@ -97,8 +75,7 @@ class GESService:
         
         for namespace in namespaces:
             groups = self.get_user_groups_in_namespace(username, namespace)
-            # Only include namespace if user has groups in it
-            if groups:
+            if groups:  # Only include if user has groups
                 results[namespace] = groups
         
         return results
