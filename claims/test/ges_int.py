@@ -1,84 +1,103 @@
 # auth/ges_integration.py
-import logging
-from typing import List, Dict
+import logging, ast, json
+from typing import List, Dict, Any
 from ges_entitylements.security import EntitlementsService
 
 logger = logging.getLogger(__name__)
 
+def _safe_parse_groups(obj: Any) -> List[str]:
+    """
+    Accepts: list | set | str(repr(list|set)) | {"namespace": <list|set|str>} | None
+    Returns: list[str]
+    """
+    def _to_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple, set)):
+            return [str(i) for i in x]
+        if isinstance(x, dict):
+            # Common GES wrap: {"namespace": "['A','B']"} or {"namespace": ['A','B']}
+            if "namespace" in x:
+                return _to_list(x["namespace"])
+            # Fall back to all values
+            out = []
+            for v in x.values():
+                out.extend(_to_list(v))
+            return out
+        if isinstance(x, str):
+            s = x.strip()
+            # If string looks like a Python/JSON container, try parsing
+            if (s.startswith('[') and s.endswith(']')) or (s.startswith('{') and s.endswith('}')):
+                # Try ast first (handles single quotes + sets)
+                try:
+                    parsed = ast.literal_eval(s)
+                    return _to_list(parsed)
+                except Exception:
+                    # Try JSON as a secondary path (requires double quotes / lists)
+                    try:
+                        parsed = json.loads(s)
+                        return _to_list(parsed)
+                    except Exception:
+                        # Fall-through to manual split for degenerate cases
+                        pass
+            # Manual split on commas if user sent "A, B, C"
+            if ',' in s and not s.startswith('{'):
+                return [p.strip().strip("'\"") for p in s.split(',') if p.strip()]
+            # Otherwise treat as single group token
+            return [s.strip().strip("'\"")]
+        # Anything else → string it
+        return [str(x)]
+
+    items = _to_list(obj)
+    # de-dup while preserving order
+    seen, out = set(), []
+    for g in items:
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out
+
+
 class GESService:
-    def __init__(self):
-        pass
-        
+    def __init__(self): ...
+
     def get_user_groups_in_namespace(self, username: str, namespace: str) -> List[str]:
         """
-        Get user's groups in a specific namespace
-        Properly handles set responses from GES
+        Get user's groups in a specific namespace. Handles list/set/str/dict variants.
         """
         try:
-            # Replace with your actual GES connection details
             hostname = "your-ges-server.com"
             port = 8080
             client_id = "your-client-id"
             client_key = "your-client-key"
-            
+
             logger.info(f"Checking GES groups for user '{username}' in namespace '{namespace}'")
-            
-            # Create GES service instance
+
             ges_service = EntitlementsService(
                 hostname=hostname,
                 port=port,
                 namespace=namespace,
                 client_id=client_id,
-                client_key=client_key
+                client_key=client_key,
             )
-            
-            # Get user's groups from GES
-            groups = ges_service.get_roles(username)
-            
-            logger.info(f"Raw GES response type: {type(groups)}")
-            logger.info(f"Raw GES response: {groups}")
-            
-            # Handle different response formats
-            if isinstance(groups, (set, list)):
-                # Already a set or list - convert to list of strings
-                group_list = [str(group) for group in groups]
-                logger.info(f"Converted to list: {group_list}")
-                
-            elif isinstance(groups, str):
-                # String representation - try to parse it
-                groups_cleaned = groups.strip()
-                if (groups_cleaned.startswith('{') and groups_cleaned.endswith('}')) or \
-                   (groups_cleaned.startswith('[') and groups_cleaned.endswith(']')):
-                    # Remove braces/brackets and split
-                    inner_content = groups_cleaned[1:-1]
-                    group_list = [group.strip().strip("'\"") for group in inner_content.split(',')]
-                    logger.info(f"Parsed from string: {group_list}")
-                else:
-                    # Single group as string
-                    group_list = [groups_cleaned]
-            else:
-                # Other type or None
-                group_list = []
-            
-            logger.info(f"Final processed groups: {group_list}")
+
+            raw = ges_service.get_roles(username)
+            logger.info(f"Raw GES response type: {type(raw)}")
+            logger.info(f"Raw GES response: {raw}")
+
+            group_list = _safe_parse_groups(raw)
+            logger.info(f"Processed groups: {group_list}")
             return group_list
-            
         except Exception as e:
-            logger.error(f"Error getting GES groups: {str(e)}")
+            logger.error(f"Error getting GES groups: {e}", exc_info=True)
             return []
 
     def get_user_groups_in_namespaces(self, username: str, namespaces: List[str]) -> Dict[str, List[str]]:
-        """
-        Get user's groups across multiple namespaces
-        """
         results = {}
-        
-        for namespace in namespaces:
-            groups = self.get_user_groups_in_namespace(username, namespace)
-            if groups:  # Only include if user has groups
-                results[namespace] = groups
-        
+        for ns in namespaces:
+            groups = self.get_user_groups_in_namespace(username, ns)
+            if groups:
+                results[ns] = groups
         return results
 
-# Global GES service instance
 ges_service = GESService()
