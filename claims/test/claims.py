@@ -1,101 +1,120 @@
-# claims/ges_claims.py - Add detailed debugging
+# claims/ges_claims.py
 import logging
 import yaml
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
 def get_ges_claims_from_api_key(username: str, api_key: str) -> Dict[str, Any]:
     """
-    Get claims based on user's GES groups in namespaces defined in the API key YAML
+    Get claims based on user's GES groups in namespaces
     """
     try:
         from auth.ges_integration import ges_service
+        
+        logger.info(f"🚀 STARTING GES CLAIMS PROCESSING")
+        logger.info(f"   User: {username}")
+        logger.info(f"   API Key: {api_key}")
         
         # Load API key configuration
         api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
         api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
         
-        logger.info(f"Looking for API key file: {api_key_file}")
-        
         if not os.path.exists(api_key_file):
-            logger.warning(f"API key file not found: {api_key_file}")
+            logger.warning(f"❌ API key file not found")
             return {}
         
         with open(api_key_file, 'r') as f:
             api_key_config = yaml.safe_load(f)
         
-        # Get namespace configurations from API key metadata
-        metadata = api_key_config.get('metadata', {})
-        namespace_configs = metadata.get('ges_namespaces', {})
-        
-        logger.info(f"Found namespace configs in API key: {list(namespace_configs.keys())}")
+        # Get namespace configurations
+        namespace_configs = api_key_config.get('metadata', {}).get('ges_namespaces', {})
         
         if not namespace_configs:
-            logger.info(f"No GES namespace configurations found in API key {api_key}")
+            logger.info("❌ No GES namespace configurations found")
             return {}
         
-        # Extract the namespace names from the API key YAML
+        # Get namespaces to check
         namespaces_to_check = list(namespace_configs.keys())
-        logger.info(f"Checking namespaces from API key {api_key}: {namespaces_to_check}")
+        logger.info(f"🔍 Checking namespaces: {namespaces_to_check}")
         
-        # Get user's groups in all specified namespaces from API key
-        user_namespace_groups = ges_service.get_user_groups_in_namespaces(
-            username, namespaces_to_check
-        )
+        # Get user's groups in namespaces
+        user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, namespaces_to_check)
+        logger.info(f"👥 User groups from GES: {user_namespace_groups}")
         
-        logger.info(f"User {username} groups in namespaces: {user_namespace_groups}")
+        # If user has no groups in any namespace, return empty claims
+        if not user_namespace_groups:
+            logger.info(f"❌ User has no groups in any namespace")
+            return {}
         
         claims = {}
         matched_groups = []
         
-        # Process each namespace defined in the API key YAML
-        for namespace, namespace_config in namespace_configs.items():
-            user_groups = user_namespace_groups.get(namespace, [])
-            group_claims_mapping = namespace_config.get('group_claims', {})
+        # Process each namespace where user has groups
+        for namespace, user_groups in user_namespace_groups.items():
+            logger.info(f"🎯 Processing namespace: {namespace}")
+            logger.info(f"   User groups: {user_groups}")
+            logger.info(f"   Type of user_groups: {type(user_groups)}")
             
-            logger.info(f"Checking namespace '{namespace}': user has groups {user_groups}")
-            logger.info(f"Group claims mapping for this namespace: {list(group_claims_mapping.keys())}")
+            # Get group claims mapping for this namespace
+            if namespace not in namespace_configs:
+                logger.warning(f"   ⚠️ Namespace '{namespace}' not found in API key config")
+                continue
+                
+            group_claims_mapping = namespace_configs[namespace].get('group_claims', {})
+            api_key_groups = list(group_claims_mapping.keys())
+            logger.info(f"   API key groups: {api_key_groups}")
             
-            # Check each group mapping in this namespace from API key YAML
-            for group_name, group_claims in group_claims_mapping.items():
-                # Normalize both sides for comparison
-                normalized_config_group = group_name.lower().strip()
-                user_groups_normalized = [g.lower().strip() for g in user_groups]
+            # Check each group the user belongs to
+            for user_group in user_groups:
+                logger.info(f"   🔍 Checking user group: '{user_group}' (type: {type(user_group)})")
                 
-                logger.info(f"Checking group '{group_name}' (normalized: '{normalized_config_group}') against user groups: {user_groups_normalized}")
+                # Clean the group name (remove extra quotes/spaces)
+                user_group_clean = str(user_group).strip().strip("'\"")
+                logger.info(f"   🔧 Cleaned group name: '{user_group_clean}'")
                 
-                if normalized_config_group in user_groups_normalized:
-                    logger.info(f"✅ MATCH: User {username} is member of group {group_name} in namespace {namespace}")
-                    logger.info(f"Applying claims: {group_claims}")
+                # Try exact match
+                if user_group_clean in group_claims_mapping:
+                    group_claims = group_claims_mapping[user_group_clean]
+                    logger.info(f"   ✅ EXACT MATCH FOUND for group '{user_group_clean}'")
+                    logger.info(f"   📦 Claims to apply: {group_claims}")
                     
-                    # Merge the claims from API key YAML
+                    # Merge the claims
                     claims.update(group_claims)
-                    matched_groups.append(f"{namespace}:{group_name}")
+                    matched_groups.append(f"{namespace}:{user_group_clean}")
+                    logger.info(f"   ✅ Claims applied successfully")
+                
                 else:
-                    logger.info(f"❌ NO MATCH: Group '{group_name}' not found in user's groups")
+                    logger.info(f"   ❌ No exact match for '{user_group_clean}'")
+                    
+                    # Try case-insensitive match
+                    user_group_lower = user_group_clean.lower()
+                    for api_group in api_key_groups:
+                        if api_group.lower() == user_group_lower:
+                            group_claims = group_claims_mapping[api_group]
+                            logger.info(f"   ✅ CASE-INSENSITIVE MATCH: '{user_group_clean}' -> '{api_group}'")
+                            logger.info(f"   📦 Claims to apply: {group_claims}")
+                            
+                            claims.update(group_claims)
+                            matched_groups.append(f"{namespace}:{user_group_clean}->{api_group}")
+                            logger.info(f"   ✅ Claims applied successfully")
+                            break
+                    else:
+                        logger.info(f"   ❌ No case-insensitive match either")
         
-        # Apply default claims from API key if defined and no specific groups matched
-        if not claims and 'default_claims' in metadata:
-            logger.info("No group matches found, applying default claims")
-            claims.update(metadata.get('default_claims', {}))
-        
-        # Add GES information for debugging/auditing
+        # Final results
         if claims:
-            claims['_ges_metadata'] = {
-                'api_key': api_key,
-                'matched_groups': matched_groups,
-                'namespaces_checked': namespaces_to_check,
-                'namespaces_with_groups': [ns for ns, groups in user_namespace_groups.items() if groups],
-                'all_user_groups': user_namespace_groups
-            }
-            logger.info(f"✅ Final GES claims for user {username}: {claims}")
+            logger.info(f"🎉 SUCCESS: Generated GES claims")
+            logger.info(f"📋 Matched groups: {matched_groups}")
+            logger.info(f"🔧 Final claims keys: {list(claims.keys())}")
         else:
-            logger.warning(f"❌ No GES claims generated for user {username}")
+            logger.warning(f"💔 No claims generated")
+            logger.info(f"User had groups: {user_namespace_groups}")
+            logger.info(f"But no matches with API key groups: {api_key_groups}")
         
         return claims
         
     except Exception as e:
-        logger.error(f"Error processing GES claims from API key: {str(e)}", exc_info=True)
+        logger.error(f"💥 Error in GES claims processing: {str(e)}", exc_info=True)
         return {}
