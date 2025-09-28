@@ -9,6 +9,7 @@ from flask import request, jsonify
 
 logger = logging.getLogger(__name__)
 
+
 def _normalize(name: str) -> str:
     """
     Canonicalize group names for matching:
