@@ -1,103 +1,317 @@
-def check_pre_validation(api_key: str, normalized_ad_groups: list[str], username: str) -> dict:
-    """
-    Validate user according to API key's pre_validation_check:
+# --- helpers ---------------------------------------------------------------
 
-    pre_validation_check:
-      mode: any         # optional, 'any' (default) or 'all'
-      LDAP: "AML.Viewer, DFS"   # comma-separated or list
-      GES:  "namespace1, namespace2"  # comma-separated or list
+import os
+import re
+import yaml
+import logging
 
-    - LDAP passes if the user is in ANY of the listed AD groups.
-    - GES passes if the user belongs to ANY group within ANY of the listed namespaces.
-    - Final decision uses 'mode' across the present checks (any|all).
+logger = logging.getLogger(__name__)
+
+def _normalize(name: str) -> str:
     """
+    Canonicalize group names for matching:
+    - lower-case
+    - collapse separators: treat '.' and '_' as equivalent
+    - strip surrounding quotes/spaces
+    """
+    s = str(name).strip().strip("'\"").lower()
+    # replace any run of [._\s-] with a single dot
+    s = re.sub(r"[._\s-]+", ".", s)
+    return s
+
+def extract_group_cn(groups):
+    result = []
+    for g in (groups or []):
+        if isinstance(g, dict):
+            cn = g.get('cn') or g.get('name') or g.get('uid') or ''
+            if cn:
+                result.append(cn.lower())
+        elif isinstance(g, str):
+            m = re.search(r'cn=([^,]+)', g, flags=re.I)
+            result.append((m.group(1) if m else g).lower())
+    seen, ordered = set(), []
+    for n in result:
+        if n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+def parse_comma_separated_groups(group_config: str) -> list:
+    if not group_config:
+        return []
+    groups = [group.strip() for group in group_config.split(',')]
+    return [_normalize(group) for group in groups if group]
+
+def user_pre_validation(api_key: str, normalized_groups: list, username: str) -> dict:
     try:
+        # Load the API key configuration
         api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
         api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+
         if not os.path.exists(api_key_file):
-            return {"valid": False, "message": "Invalid API key"}
+            return {
+                "valid": False,
+                "message": "Invalid API key"
+            }
 
-        with open(api_key_file, "r") as f:
-            api_key_config = yaml.safe_load(f) or {}
+        with open(api_key_file, 'r') as f:
+            api_key_config = yaml.safe_load(f)
 
-        pvc = api_key_config.get("pre_validation_check") or {}
-        # Backward compatibility: if pvc is a string/list, treat as LDAP-only
-        if isinstance(pvc, (str, list, tuple, set)):
-            pvc = {"LDAP": pvc}
+        # Check if pre_validation_check is configured
+        pre_validation_config = api_key_config.get('pre_validation_check')
+        if not pre_validation_config:
+            # No pre-validation required
+            return {
+                "valid": True,
+                "message": "No pre-validation required"
+            }
 
-        mode = str(pvc.get("mode", "any")).lower()
-        ldap_required   = _parse_csv_or_list(pvc.get("LDAP"))
-        ges_namespaces  = _parse_csv_or_list(pvc.get("GES"))
-
-        # Nothing configured -> allow
-        if not ldap_required and not ges_namespaces:
-            return {"valid": True, "message": "No pre-validation required"}
-
-        # Prepare user groups (normalized AD)
-        ad_norm = [_norm_group(g) for g in (normalized_ad_groups or [])]
-
-        # LDAP check (ANY match)
-        ldap_ok = False
-        matched_ldap = []
-        if ldap_required:
-            required_norm = [_norm_group(g) for g in ldap_required]
-            user_set = set(ad_norm)
-            matched_ldap = [g for g in required_norm if g in user_set]
-            ldap_ok = len(matched_ldap) > 0
-
-        # GES check (ANY namespace where user has ANY group)
-        ges_ok = False
-        matched_ns = []
-        if ges_namespaces:
-            try:
-                from auth.ges_integration import ges_service
-                for ns in ges_namespaces:
-                    ns = ns.strip()
-                    if not ns:
-                        continue
-                    groups = ges_service.get_user_groups_in_namespace(username, ns) or []
-                    # If the user has at least one group in this namespace, we consider GES passed
-                    if groups:
-                        ges_ok = True
-                        matched_ns.append(ns)
-                        break  # ANY namespace is enough
-            except Exception as e:
-                logger.error(f"Failed to query GES namespaces for pre-validation: {e}", exc_info=True)
-                ges_ok = False
-
-        # Combine according to mode, but only across checks that are actually present
-        checks = []
-        labels = []
-        if ldap_required:
-            checks.append(ldap_ok); labels.append(f"LDAP({','.join(ldap_required)})")
-        if ges_namespaces:
-            checks.append(ges_ok);  labels.append(f"GES({','.join(ges_namespaces)})")
-
-        if not checks:
-            return {"valid": True, "message": "No pre-validation required"}
-
-        if mode == "all":
-            ok = all(checks)
+        # Handle both old string format and new dict format for backward compatibility
+        if isinstance(pre_validation_config, str):
+            # Old format: simple string with comma-separated LDAP groups
+            logger.info("Using legacy pre-validation format")
+            required_ldap_groups = parse_comma_separated_groups(pre_validation_config)
+            required_ges_namespaces = []
+        elif isinstance(pre_validation_config, dict):
+            # New format: structured configuration with LDAP and GES
+            logger.info("Using structured pre-validation format")
+            
+            # Parse LDAP groups if specified
+            ldap_config = pre_validation_config.get('LDAP', '')
+            if isinstance(ldap_config, str):
+                required_ldap_groups = parse_comma_separated_groups(ldap_config)
+            else:
+                required_ldap_groups = []
+            
+            # Parse GES namespaces if specified
+            ges_config = pre_validation_config.get('GES', '')
+            if isinstance(ges_config, str):
+                required_ges_namespaces = [ns.strip() for ns in ges_config.split(',') if ns.strip()]
+            elif isinstance(ges_config, list):
+                required_ges_namespaces = [ns for ns in ges_config if ns]
+            else:
+                required_ges_namespaces = []
         else:
-            ok = any(checks)
+            logger.warning(f"Invalid pre_validation_check format: {type(pre_validation_config)}")
+            return {
+                "valid": False,
+                "message": "Invalid pre-validation configuration format"
+            }
 
-        if ok:
-            details = []
-            if ldap_required:
-                details.append(f"LDAP matched: {matched_ldap}" if matched_ldap else "LDAP not matched")
-            if ges_namespaces:
-                details.append(f"GES matched namespaces: {matched_ns}" if matched_ns else "GES not matched")
-            return {"valid": True, "message": f"Pre-validation passed ({mode} of {labels}). " + "; ".join(details)}
+        logger.info(f"Required LDAP groups: {required_ldap_groups}")
+        logger.info(f"Required GES namespaces: {required_ges_namespaces}")
 
+        # If no requirements specified, validation passes
+        if not required_ldap_groups and not required_ges_namespaces:
+            return {
+                "valid": True,
+                "message": "No specific validation requirements"
+            }
+
+        # Check LDAP groups first - user needs to be in ANY of the required groups
+        if required_ldap_groups:
+            normalized_user_groups = [_normalize(group) for group in normalized_groups]
+            ldap_matches = [group for group in required_ldap_groups if group in normalized_user_groups]
+            if ldap_matches:
+                return {
+                    "valid": True,
+                    "message": f"User has access via LDAP groups: {', '.join(ldap_matches)}",
+                    "matched_groups": ldap_matches,
+                    "source": "LDAP"
+                }
+
+        # Check GES namespace membership - user needs to have ANY groups in ANY namespace
+        if required_ges_namespaces:
+            try:
+                from auth.ges_auth import ges_service
+                
+                logger.info("Checking GES namespace membership")
+                
+                # Use the existing GES service to check namespace membership
+                user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, required_ges_namespaces)
+                logger.info(f"User GES namespace groups: {user_namespace_groups}")
+                
+                # Check if user has ANY groups in ANY of the required namespaces
+                accessible_namespaces = []
+                for namespace, groups in user_namespace_groups.items():
+                    if groups:  # User has at least one group in this namespace
+                        accessible_namespaces.append(namespace)
+                
+                if accessible_namespaces:
+                    return {
+                        "valid": True,
+                        "message": f"User has access via GES namespaces: {', '.join(accessible_namespaces)}",
+                        "matched_namespaces": accessible_namespaces,
+                        "source": "GES"
+                    }
+            except ImportError:
+                logger.warning("GES integration not available - skipping GES validation")
+            except Exception as e:
+                logger.error(f"Error checking GES namespace membership: {str(e)}")
+
+        # No matches found
+        error_details = []
+        if required_ldap_groups:
+            error_details.append(f"LDAP groups: {required_ldap_groups}")
+        if required_ges_namespaces:
+            error_details.append(f"GES namespaces: {required_ges_namespaces}")
+        
         return {
             "valid": False,
-            "message": f"Pre-validation failed ({mode} of {labels}).",
-            "required": {"LDAP": ldap_required, "GES": ges_namespaces},
-            "user_ad_groups": ad_norm,
-            "matched_ldap": matched_ldap,
-            "matched_ges_namespaces": matched_ns,
+            "message": f"User does not meet pre-validation requirements",
+            "details": error_details,
+            "user_ad_groups": normalized_groups
         }
 
     except Exception as e:
-        logger.error(f"Error during pre-validation check: {e}", exc_info=True)
-        return {"valid": False, "message": f"Error during validation: {e}"}
+        logger.error(f"Error during pre-validation check: {str(e)}")
+        return {
+            "valid": False,
+            "message": f"Error during validation: {str(e)}"
+        }
+
+# --- /token route ----------------------------------------------------------
+
+@app.route('/token', methods=['POST'])
+def login():
+    if not request.is_json:
+        return jsonify({"error": "Missing JSON in request"}), 400
+
+    username = request.json.get("username", None)
+    password = request.json.get("password", None)
+    api_key  = request.json.get("api_key", None)
+    custom_secret = request.json.get("secret", None)
+
+    if not username or not password:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    # Authenticate based on the configured method
+    if AUTH_METHOD == "ldap":
+        authenticated, user_data = authenticate_ldap(username, password)
+    else:
+        # file-based authentication
+        authenticated, user_data = authenticate_file(username, password)
+
+    if not authenticated:
+        error_message = "Invalid username or password"
+        if "error" in user_data:
+            error_message = user_data["error"]
+        return jsonify({"error": error_message}), 401
+
+    # Prepare group info
+    raw_groups = user_data.get("groups", [])
+    normalized_groups = extract_group_cn(raw_groups)
+
+    # API-key pre-validation (if provided)
+    if api_key:
+        validation_result = user_pre_validation(api_key, normalized_groups, username)
+        if not validation_result["valid"]:
+            return jsonify({
+                "error": validation_result["message"],
+                "details": validation_result.get("details"),
+                "user_ad_groups": validation_result.get("user_ad_groups")
+            }), 403
+		try:
+			from claims.ges_claims import get_ges_claims_from_api_key
+			ges_claims = get_ges_claims_from_api_key(username, api_key)
+		except Exception as e:
+			logger.error(f"Error fetching GES claims: {str(e)}")
+			ges_claims = {}  # Ensure it's empty on error
+
+    # Create a proper user context for dynamic claims
+    user_context = {
+        "user_id": username,
+        "team_id": get_team_id_from_user(username, user_data),
+        "groups": normalized_groups,
+        "api_key_id": api_key,    # you can use the API key itself as an ID if needed
+    }
+
+    # Process API key (dynamic claims)
+    if api_key:
+        logger.info(f"Processing API key with user context: {user_context}")
+        api_key_claims = get_additional_claims(api_key, user_context)
+    else:
+        api_key_claims = get_additional_claims(None, user_context)
+
+    # Log which API key is being used
+    if api_key:
+        logger.info(f"Using provided API key: {api_key}")
+    else:
+        logger.info("No API key provided, using base claims only")
+
+    # Merge user data with additional claims
+    # (there may also be GES claims if you call them earlier)
+    claims = {**user_data, **ges_claims, **api_key_claims}
+    claims.pop("groups", None)  # prevent leaking raw groups
+
+    # Get expiration time from API key configuration if available
+    expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]  # Default
+    if "exp_hours" in claims:
+        expires_delta = timedelta(hours=claims["exp_hours"])
+        claims.pop("exp_hours", None)
+
+    # If custom secret is provided, use it with PyJWT directly instead of flask_jwt_extended
+    if custom_secret:
+        import jwt
+        import datetime as dt
+        import uuid
+
+        # Log that we're using a custom secret
+        logger.info("Using custom secret for token generation")
+
+        # Prepare the payload with the standard JWT claims
+        now = dt.datetime.now(dt.timezone.utc)
+        access_token_exp = now + expires_delta
+        refresh_token_exp = now + app.config["JWT_REFRESH_TOKEN_EXPIRES"]
+
+        # Add standard JWT claims to the payload
+        access_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": access_token_exp,
+            "sub": username,
+            "type": "access",
+            "fresh": True,
+            **claims  # Include all the additional claims
+        }
+
+        refresh_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": refresh_token_exp,
+            "sub": username,
+            "type": "refresh",
+            **claims  # Include all the additional claims
+        }
+
+        logger.info(f"Final JWT access_payload: {access_payload}")
+
+        # Generate the tokens using PyJWT directly with the custom secret
+        algorithm = app.config.get("JWT_ALGORITHM", "HS256")
+        access_token  = jwt.encode(access_payload,  custom_secret, algorithm=algorithm)
+        refresh_token = jwt.encode(refresh_payload, custom_secret, algorithm=algorithm)
+
+        # Add note to response indicating custom secret was used
+        return jsonify({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "note": "Tokens generated with custom secret"
+        }), 200
+
+    else:
+        logger.info(f"Generated claims for user before creating tokens: username={username} claims={claims}")
+
+        # Standard token creation with application secret
+        access_token = create_access_token(
+            identity=username,
+            additional_claims=claims,
+            expires_delta=expires_delta,
+            fresh=True,  # Mark the token as fresh since it's from direct login
+        )
+        refresh_token = create_refresh_token(
+            identity=username,
+            additional_claims=claims
+        )
+        return jsonify(access_token=access_token, refresh_token=refresh_token), 200
