@@ -1,18 +1,121 @@
-# config/api_keys/test_ges.yaml
-id: test_ges
-owner: Test User
+# opa policy section
+opa_policy: |
+  package jwt.claims
 
-metadata:
-  ges_namespaces:
-    "com.text.qwe.tert":
-      group_claims:
-        "ADS":
-          test_claim: "ads_user"
-          models: ["test-model"]
-        "AD.read.ASW":
-          test_claim: "read_user" 
-          models: ["test-model-2"]
+  default document_type := ""
 
-  default_claims:
-    test_claim: "default_user"
-    models: ["default-model"]
+  # Check if user has specific LDAP group
+  has_ldap_access if {
+    some group
+    input.ldap_groups[group] == "ldap_group1"
+  }
+
+  # Check if user has specific GES group in any namespace
+  has_ges_access if {
+    some group
+    input.ges_groups[group] == "ges_group1"
+  }
+
+  # Check if user has any group in specific GES namespace
+  has_ges_namespace_access if {
+    some group
+    startswith(input.ges_groups[group], "namespace1/")
+  }
+
+  # Check if user has admin access via either LDAP or GES
+  is_admin if {
+    has_ldap_access
+  } else {
+    has_ges_access
+  }
+
+  # Document type based on combined access
+  document_type := "confidential" if {
+    is_admin
+  }
+
+  document_type := "proprietary" if {
+    not is_admin
+    some group
+    startswith(input.ldap_groups[group], "dspsa-")
+  } else {
+    not is_admin
+    some group
+    startswith(input.ges_groups[group], "dspsa-")
+  }
+
+  document_type := "public" if {
+    not is_admin
+    not startswith(input.ldap_groups[_], "dspsa-")
+    not startswith(input.ges_groups[_], "dspsa-")
+  }
+
+
+Example 1: Check Specific GES Namespace Membership
+
+opa_policy: |
+  package jwt.claims
+  
+  default access_level := "read"
+  
+  # User has write access if they have any group in "ai-platform" namespace
+  access_level := "write" if {
+    some group
+    startswith(input.ges_groups[group], "ai-platform/")
+  }
+  
+  # User has admin access if they have specific LDAP group OR specific GES group
+  access_level := "admin" if {
+    input.ldap_groups[_] == "administrators"
+  } else {
+    input.ges_groups[_] == "ai-platform/admin"
+  }
+
+  Example 2: Role-Based Access with Both LDAP and GES
+  opa_policy: |
+  package jwt.claims
+  
+  default roles := []
+  
+  # Add roles based on LDAP groups
+  roles := ["data_scientist"] if {
+    input.ldap_groups[_] == "data-science-team"
+  }
+  
+  # Add roles based on GES groups
+  roles := roles + ["ml_engineer"] if {
+    some group
+    startswith(input.ges_groups[group], "ml-platform/")
+  }
+  
+  # Add admin role if user has either LDAP admin or GES admin
+  roles := roles + ["admin"] if {
+    input.ldap_groups[_] == "administrators"
+  } else {
+    input.ges_groups[_] == "ml-platform/admins"
+  }
+
+
+  Example 3: Environment Access Control
+opa_policy: |
+  package jwt.claims
+  
+  default environments := []
+  
+  # Grant prod access based on LDAP groups
+  environments := environments + ["production"] if {
+    input.ldap_groups[_] == "prod-access"
+  }
+  
+  # Grant staging access based on GES namespace
+  environments := environments + ["staging"] if {
+    some group
+    startswith(input.ges_groups[group], "staging-namespace/")
+  }
+  
+  # Grant dev access to everyone with any GES group
+  environments := environments + ["development"] if {
+    count(input.ges_groups) > 0
+  }
+
+  
