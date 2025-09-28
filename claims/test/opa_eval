@@ -1,0 +1,17 @@
+def evaluate_opa_policy(user_ldap_groups, user_ges_groups=None, query_path="jwt/claims/document_type"):
+    opa_url = f"{OPA_BASE_URL}/v1/data/{query_path}"
+    opa_input = {
+        "ldap_groups": user_ldap_groups,
+        "ges_groups": user_ges_groups or []
+    }
+    logger.info(f"OPA input - LDAP groups: {user_ldap_groups}, GES groups: {user_ges_groups}")
+    try:
+        response = requests.post(opa_url, json={"input": opa_input})
+        logger.info(f"OPA evaluate response status: {response.status_code}")
+        response.raise_for_status()
+        result = response.json().get("result")
+        logger.info(f"OPA evaluate response result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"OPA evaluation failed: {e}")
+        return None
