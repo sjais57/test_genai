@@ -1,3 +1,136 @@
+def check_pre_validation(api_key: str, ad_groups: list, username: str) -> dict:
+    """
+    Check if the user meets the pre-validation requirements for the API key
+    Uses existing GES integration service for GES group checks
+    
+    Args:
+        api_key: The API key string
+        ad_groups: List of AD/LDAP groups from user
+        username: The username for GES lookup
+        
+    Returns:
+        Dict with validation result and message
+    """
+    
+    def parse_comma_separated_groups(group_config: str) -> list:
+        """
+        Parse comma-separated groups configuration
+        
+        Args:
+            group_config: Comma-separated string of groups
+            
+        Returns:
+            List of normalized group names
+        """
+        if not group_config:
+            return []
+        
+        groups = [group.strip() for group in group_config.split(',')]
+        return [_normalize(group) for group in groups if group]
+    
+    try:
+        # Load the API key configuration
+        api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
+        api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
+        
+        if not os.path.exists(api_key_file):
+            return {
+                "valid": False,
+                "message": "Invalid API key"
+            }
+        
+        with open(api_key_file, 'r') as f:
+            api_key_config = yaml.safe_load(f)
+        
+        # Check if pre_validation_check is configured
+        pre_validation_config = api_key_config.get('pre_validation_check')
+        if not pre_validation_config:
+            # No pre-validation required
+            return {
+                "valid": True,
+                "message": "No pre-validation required"
+            }
+        
+        # Parse required groups (comma-separated)
+        if isinstance(pre_validation_config, dict):
+            # New format: check both LDAP and GES sections
+            ldap_groups_config = pre_validation_config.get('LDAP', '')
+            ges_namespaces_config = pre_validation_config.get('GES', '')
+            
+            required_ldap_groups = parse_comma_separated_groups(ldap_groups_config)
+            required_ges_namespaces = [ns.strip() for ns in ges_namespaces_config.split(',')] if ges_namespaces_config else []
+        else:
+            # Old format: treat as LDAP groups only
+            required_ldap_groups = parse_comma_separated_groups(str(pre_validation_config))
+            required_ges_namespaces = []
+        
+        logger.info(f"Required LDAP groups: {required_ldap_groups}")
+        logger.info(f"Required GES namespaces: {required_ges_namespaces}")
+        
+        # If no requirements specified, validation passes
+        if not required_ldap_groups and not required_ges_namespaces:
+            return {
+                "valid": True,
+                "message": "No specific validation requirements"
+            }
+        
+        # Get user's AD groups (normalized)
+        normalized_ad_groups = [_normalize(group) for group in ad_groups]
+        logger.info(f"User AD groups: {normalized_ad_groups}")
+        
+        # Check LDAP groups first - user needs to be in ANY of the required groups
+        if required_ldap_groups:
+            ldap_matches = [group for group in required_ldap_groups if group in normalized_ad_groups]
+            if ldap_matches:
+                return {
+                    "valid": True,
+                    "message": f"User has access via LDAP groups: {', '.join(ldap_matches)}",
+                    "matched_groups": ldap_matches,
+                    "source": "LDAP"
+                }
+        
+        # Check GES namespace membership using existing GES service
+        if required_ges_namespaces and GES_AVAILABLE:
+            logger.info("Checking GES namespace membership using GES service")
+            
+            # Use the existing GES service to check namespace membership
+            user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, required_ges_namespaces)
+            logger.info(f"User GES namespace groups: {user_namespace_groups}")
+            
+            # Check if user has ANY groups in ANY of the required namespaces
+            accessible_namespaces = []
+            for namespace, groups in user_namespace_groups.items():
+                if groups:  # User has at least one group in this namespace
+                    accessible_namespaces.append(namespace)
+            
+            if accessible_namespaces:
+                return {
+                    "valid": True,
+                    "message": f"User has access via GES namespaces: {', '.join(accessible_namespaces)}",
+                    "matched_namespaces": accessible_namespaces,
+                    "user_ges_groups": user_namespace_groups,
+                    "source": "GES"
+                }
+        
+        # No matches found
+        return {
+            "valid": False,
+            "message": f"User does not have access to any required groups or namespaces",
+            "required_ldap_groups": required_ldap_groups,
+            "required_ges_namespaces": required_ges_namespaces,
+            "user_ad_groups": ad_groups,
+            "user_ges_groups": user_namespace_groups if 'user_namespace_groups' in locals() else {}
+        }
+            
+    except Exception as e:
+        logger.error(f"Error during pre-validation check: {str(e)}")
+        return {
+            "valid": False,
+            "message": f"Error during validation: {str(e)}"
+        }
+
+
+===============
 import os
 import re
 from datetime import timedelta, datetime
@@ -135,43 +268,6 @@ def extract_group_cn(groups):
             ordered.append(n)
     return ordered
 
-def get_ges_groups_for_user(username: str, namespaces: list) -> list:
-    """
-    Get GES groups for a user across specified namespaces
-    
-    Args:
-        username: The username
-        namespaces: List of namespaces to check
-        
-    Returns:
-        List of GES groups (flattened across all namespaces)
-    """
-    if not GES_AVAILABLE:
-        logger.warning("GES integration not available")
-        return []
-    
-    try:
-        user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, namespaces)
-        logger.info(f"GES groups for user {username}: {user_namespace_groups}")
-        
-        # Flatten the groups from all namespaces
-        all_groups = []
-        for namespace_groups in user_namespace_groups.values():
-            all_groups.extend(namespace_groups)
-        
-        # Normalize and deduplicate
-        normalized_groups = [_normalize(group) for group in all_groups]
-        seen, unique_groups = set(), []
-        for group in normalized_groups:
-            if group not in seen:
-                seen.add(group)
-                unique_groups.append(group)
-        
-        return unique_groups
-    except Exception as e:
-        logger.error(f"Error getting GES groups for user {username}: {str(e)}")
-        return []
-
 def parse_comma_separated_groups(group_config: str) -> list:
     """
     Parse comma-separated groups configuration
@@ -191,7 +287,7 @@ def parse_comma_separated_groups(group_config: str) -> list:
 def check_pre_validation(api_key: str, ad_groups: list, username: str) -> dict:
     """
     Check if the user meets the pre-validation requirements for the API key
-    Supports multiple comma-separated groups - user needs to be in ANY of the groups
+    Uses existing GES integration service for GES group checks
     
     Args:
         api_key: The API key string
@@ -231,7 +327,7 @@ def check_pre_validation(api_key: str, ad_groups: list, username: str) -> dict:
             ges_namespaces_config = pre_validation_config.get('GES', '')
             
             required_ldap_groups = parse_comma_separated_groups(ldap_groups_config)
-            required_ges_namespaces = parse_comma_separated_groups(ges_namespaces_config)
+            required_ges_namespaces = [ns.strip() for ns in ges_namespaces_config.split(',')] if ges_namespaces_config else []
         else:
             # Old format: treat as LDAP groups only
             required_ldap_groups = parse_comma_separated_groups(str(pre_validation_config))
@@ -262,31 +358,37 @@ def check_pre_validation(api_key: str, ad_groups: list, username: str) -> dict:
                     "source": "LDAP"
                 }
         
-        # Check GES namespace membership - user needs to have ANY groups in ANY namespace
+        # Check GES namespace membership using existing GES service
         if required_ges_namespaces and GES_AVAILABLE:
-            logger.info("Checking GES namespace membership")
+            logger.info("Checking GES namespace membership using GES service")
             
-            ges_groups = get_ges_groups_for_user(username, required_ges_namespaces)
-            logger.info(f"User GES groups: {ges_groups}")
+            # Use the existing GES service to check namespace membership
+            user_namespace_groups = ges_service.get_user_groups_in_namespaces(username, required_ges_namespaces)
+            logger.info(f"User GES namespace groups: {user_namespace_groups}")
             
-            # If user has any groups in any of the required namespaces, they have access
-            if ges_groups:
+            # Check if user has ANY groups in ANY of the required namespaces
+            accessible_namespaces = []
+            for namespace, groups in user_namespace_groups.items():
+                if groups:  # User has at least one group in this namespace
+                    accessible_namespaces.append(namespace)
+            
+            if accessible_namespaces:
                 return {
                     "valid": True,
-                    "message": f"User has access via GES namespaces: {', '.join(required_ges_namespaces)}",
-                    "matched_namespaces": required_ges_namespaces,
-                    "user_ges_groups": ges_groups,
+                    "message": f"User has access via GES namespaces: {', '.join(accessible_namespaces)}",
+                    "matched_namespaces": accessible_namespaces,
+                    "user_ges_groups": user_namespace_groups,
                     "source": "GES"
                 }
         
         # No matches found
         return {
             "valid": False,
-            "message": f"User does not have access to any required groups",
+            "message": f"User does not have access to any required groups or namespaces",
             "required_ldap_groups": required_ldap_groups,
             "required_ges_namespaces": required_ges_namespaces,
             "user_ad_groups": ad_groups,
-            "user_ges_groups": ges_groups if 'ges_groups' in locals() else []
+            "user_ges_groups": user_namespace_groups if 'user_namespace_groups' in locals() else {}
         }
             
     except Exception as e:
@@ -460,7 +562,7 @@ def get_team_id_from_user(username, user_data):
     # Default team
     return "general-users"
 
-# ... (rest of the endpoints remain the same as in your original file)
+# ... (rest of the endpoints remain the same)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
