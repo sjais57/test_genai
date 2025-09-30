@@ -99,7 +99,7 @@ local schema = {
             default = 1000,
         },
 
-        -- SSL/TLS properties
+        -- SSL/TLS properties with file paths (matching your Python config)
         ssl = {
             type = "boolean",
             default = false,
@@ -129,17 +129,22 @@ local schema = {
             default = "PLAIN",
             description = "SASL authentication mechanism"
         },
-        ssl_ca_cert = {
+        -- File path based certificates (matching your Python config)
+        ssl_ca_location = {
             type = "string",
-            description = "Base64 encoded CA certificate"
+            description = "File path to CA certificate file"
         },
-        ssl_client_cert = {
-            type = "string",
-            description = "Base64 encoded client certificate"
+        ssl_certificate_location = {
+            type = "string", 
+            description = "File path to client certificate file"
         },
-        ssl_client_key = {
+        ssl_key_location = {
             type = "string",
-            description = "Base64 encoded client private key"
+            description = "File path to client private key file"
+        },
+        ssl_key_password = {
+            type = "string",
+            description = "Password for client private key (if encrypted)"
         },
         ssl_protocol = {
             type = "string",
@@ -208,6 +213,33 @@ function _M.check_schema(conf, schema_type)
         return nil, err
     end
 
+    -- Validate SSL certificate files exist if SSL is enabled
+    if conf.ssl then
+        if conf.ssl_ca_location then
+            local file = io.open(conf.ssl_ca_location, "r")
+            if not file then
+                return nil, "SSL CA certificate file not found: " .. conf.ssl_ca_location
+            end
+            file:close()
+        end
+        
+        if conf.ssl_certificate_location then
+            local file = io.open(conf.ssl_certificate_location, "r")
+            if not file then
+                return nil, "SSL client certificate file not found: " .. conf.ssl_certificate_location
+            end
+            file:close()
+        end
+        
+        if conf.ssl_key_location then
+            local file = io.open(conf.ssl_key_location, "r")
+            if not file then
+                return nil, "SSL client key file not found: " .. conf.ssl_key_location
+            end
+            file:close()
+        end
+    end
+
     return log_util.check_log_schema(conf)
 end
 
@@ -254,6 +286,57 @@ local function send_kafka_data(conf, ctx, prod, log_message)
                       ", brokers: " .. core.json.encode(conf.broker_list)
     end
     return true
+end
+
+-- Create Kafka producer configuration
+local function create_kafka_config(conf)
+    local kafka_config = {
+        broker_list = conf.brokers,
+        producer_type = conf.producer_type or "async",
+        required_acks = conf.required_acks or 1,
+        request_timeout = conf.timeout or 1000,
+        batch_num = conf.producer_batch_num or 200,
+        batch_size = conf.producer_batch_size or 1048576,
+        max_buffering = conf.producer_max_buffering or 50000,
+        flush_time = (conf.producer_time_linger or -1) * 1000,
+        refresh_interval = (conf.meta_refresh_interval or 30) * 1000,
+        
+        -- SSL/TLS configuration with file paths
+        ssl = conf.ssl,
+        ssl_verify = conf.ssl_verify,
+        sasl = conf.sasl,
+        sasl_username = conf.sasl_username,
+        sasl_password = conf.sasl_password,
+        sasl_mechanism = conf.sasl_mechanism,
+        ssl_ca_location = conf.ssl_ca_location,
+        ssl_certificate_location = conf.ssl_certificate_location,
+        ssl_key_location = conf.ssl_key_location,
+        ssl_key_password = conf.ssl_key_password,
+        ssl_protocol = conf.ssl_protocol,
+    }
+
+    -- Handle SASL config from individual brokers (for backward compatibility)
+    if conf.brokers and not conf.sasl then
+        for i, broker in ipairs(conf.brokers) do
+            if broker.sasl_config then
+                kafka_config.sasl = true
+                kafka_config.sasl_username = broker.sasl_config.user
+                kafka_config.sasl_password = broker.sasl_config.password
+                kafka_config.sasl_mechanism = broker.sasl_config.mechanism
+                if broker.sasl_config.ssl then
+                    kafka_config.ssl = broker.sasl_config.ssl
+                    kafka_config.ssl_verify = broker.sasl_config.ssl_verify
+                end
+                break -- use first broker's SASL config
+            end
+        end
+    end
+
+    core.log.info("SSL Config - CA: ", kafka_config.ssl_ca_location or "not set",
+                  ", Cert: ", kafka_config.ssl_certificate_location or "not set",
+                  ", Key: ", kafka_config.ssl_key_location or "not set")
+
+    return kafka_config
 end
 
 -- --------------------------------------------------------------------------
@@ -312,44 +395,8 @@ function _M.log(conf, ctx)
         end
     end
 
-    -- Basic broker configuration
-    broker_config["request_timeout"]   = conf.timeout or 1000
-    broker_config["producer_type"]     = conf.producer_type
-    broker_config["required_acks"]     = conf.required_acks
-    broker_config["batch_num"]         = conf.producer_batch_num
-    broker_config["batch_size"]        = conf.producer_batch_size
-    broker_config["max_buffering"]     = conf.producer_max_buffering
-    broker_config["flush_time"]        = (conf.producer_time_linger or -1) * 1000
-    broker_config["refresh_interval"]  = (conf.meta_refresh_interval or 30) * 1000
-
-    -- SSL/TLS configuration
-    broker_config["ssl"] = conf.ssl
-    broker_config["ssl_verify"] = conf.ssl_verify
-    broker_config["sasl"] = conf.sasl
-    broker_config["sasl_username"] = conf.sasl_username
-    broker_config["sasl_password"] = conf.sasl_password
-    broker_config["sasl_mechanism"] = conf.sasl_mechanism
-    broker_config["ssl_ca_cert"] = conf.ssl_ca_cert
-    broker_config["ssl_client_cert"] = conf.ssl_client_cert
-    broker_config["ssl_client_key"] = conf.ssl_client_key
-    broker_config["ssl_protocol"] = conf.ssl_protocol
-
-    -- Handle SASL config from individual brokers (for backward compatibility)
-    if conf.brokers and not conf.sasl then
-        for i, broker in ipairs(conf.brokers) do
-            if broker.sasl_config then
-                broker_config["sasl"] = true
-                broker_config["sasl_username"] = broker.sasl_config.user
-                broker_config["sasl_password"] = broker.sasl_config.password
-                broker_config["sasl_mechanism"] = broker.sasl_config.mechanism
-                if broker.sasl_config.ssl then
-                    broker_config["ssl"] = broker.sasl_config.ssl
-                    broker_config["ssl_verify"] = broker.sasl_config.ssl_verify
-                end
-                break -- use first broker's SASL config
-            end
-        end
-    end
+    -- Create Kafka producer configuration
+    local broker_config = create_kafka_config(conf)
 
     core.log.info("kafka config - ssl: ", broker_config.ssl, 
                   ", sasl: ", broker_config.sasl,
