@@ -54,8 +54,6 @@ local schema = {
                             },
                             user = { type = "string", description = "user" },
                             password = { type = "string", description = "password" },
-                            ssl = { type = "boolean", default = false },
-                            ssl_verify = { type = "boolean", default = false },
                         },
                         required = {"user", "password"},
                     },
@@ -63,6 +61,18 @@ local schema = {
                 required = {"host", "port"},
             },
             uniqueItems = true,
+        },
+
+        broker_list = {
+            type = "array",
+            items = {
+                type = "object",
+                properties = {
+                    host = { type = "string" },
+                    port = { type = "integer", minimum = 1, maximum = 65535 },
+                },
+                required = {"host", "port"},
+            }
         },
 
         kafka_topic   = { type = "string" },
@@ -264,63 +274,25 @@ local function create_producer(broker_list, broker_config, cluster_name)
 end
 
 local function send_kafka_data(conf, ctx, prod, log_message)
-    local ok, err = prod:send(conf.kafka_topic, conf.key, log_message)
+    local ok, err = prod:send(conf.kafka_topic, conf.key, log_message, ctx)
     if not ok then
+        -- Enhanced error logging with request context
+        core.log.error("failed to send data to Kafka for request: ", ctx.var.request_uri,
+                      ", method: ", ctx.var.request_method,
+                      ", client: ", ctx.var.remote_addr,
+                      ", topic: ", conf.kafka_topic,
+                      ", error: ", err)
         return false, "failed to send data to Kafka topic: " .. (err or "unknown") ..
-                      ", brokers: " .. core.json.encode(conf.brokers)
+                      ", brokers: " .. core.json.encode(conf.brokers) ..
+                      ", request: " .. ctx.var.request_uri
     end
+    
+    -- Log successful send with request context
+    core.log.info("successfully sent log to Kafka for request: ", ctx.var.request_uri,
+                  ", client: ", ctx.var.remote_addr,
+                  ", topic: ", conf.kafka_topic,
+                  ", data size: ", #log_message)
     return true
-end
-
--- Create Kafka producer configuration
-local function create_kafka_config(conf)
-    local kafka_config = {
-        broker_list = conf.brokers,
-        producer_type = conf.producer_type or "async",
-        required_acks = conf.required_acks or 1,
-        request_timeout = conf.timeout or 1000,
-        batch_num = conf.producer_batch_num or 200,
-        batch_size = conf.producer_batch_size or 1048576,
-        max_buffering = conf.producer_max_buffering or 50000,
-        flush_time = (conf.producer_time_linger or -1) * 1000,
-        refresh_interval = (conf.meta_refresh_interval or 30) * 1000,
-        
-        -- SSL/TLS configuration with file paths
-        ssl = conf.ssl,
-        ssl_verify = conf.ssl_verify,
-        sasl = conf.sasl,
-        sasl_username = conf.sasl_username,
-        sasl_password = conf.sasl_password,
-        sasl_mechanism = conf.sasl_mechanism,
-        ssl_ca_location = conf.ssl_ca_location,
-        ssl_certificate_location = conf.ssl_certificate_location,
-        ssl_key_location = conf.ssl_key_location,
-        ssl_key_password = conf.ssl_key_password,
-        ssl_protocol = conf.ssl_protocol,
-    }
-
-    -- Handle SASL config from individual brokers
-    if conf.brokers and not conf.sasl then
-        for i, broker in ipairs(conf.brokers) do
-            if broker.sasl_config then
-                kafka_config.sasl = true
-                kafka_config.sasl_username = broker.sasl_config.user
-                kafka_config.sasl_password = broker.sasl_config.password
-                kafka_config.sasl_mechanism = broker.sasl_config.mechanism
-                if broker.sasl_config.ssl then
-                    kafka_config.ssl = broker.sasl_config.ssl
-                    kafka_config.ssl_verify = broker.sasl_config.ssl_verify
-                end
-                break -- use first broker's SASL config
-            end
-        end
-    end
-
-    core.log.info("SSL Config - CA: ", kafka_config.ssl_ca_location or "not set",
-                  ", Cert: ", kafka_config.ssl_certificate_location or "not set",
-                  ", Key: ", kafka_config.ssl_key_location or "not set")
-
-    return kafka_config
 end
 
 -- --------------------------------------------------------------------------
@@ -360,6 +332,7 @@ function _M.log(conf, ctx)
     local entry
     if conf.meta_format == "origin" then
         entry = log_util.get_req_original(ctx, conf)
+        -- core.log.info("origin entry: ", entry)
     else
         entry = log_util.get_log_entry(plugin_name, conf, ctx)
     end
@@ -368,11 +341,55 @@ function _M.log(conf, ctx)
         return
     end
 
-    -- Use only brokers (broker_list is deprecated)
+    -- reuse producer via lrucache to avoid unbalanced partitions of messages in kafka
     local broker_list = core.table.clone(conf.brokers or {})
+    local broker_config = {}
 
-    -- Create Kafka producer configuration
-    local broker_config = create_kafka_config(conf)
+    if conf.broker_list then
+        for _, host_port in pairs(conf.broker_list) do
+            local broker = {
+                host = host_port.host,
+                port = host_port.port
+            }
+            core.table.insert(broker_list, broker)
+        end
+    end
+
+    -- Original broker configuration from your code
+    broker_config["request_timeout"] = conf.timeout * 1000
+    broker_config["producer_type"] = conf.producer_type
+    broker_config["required_acks"] = conf.required_acks
+    broker_config["batch_num"] = conf.producer_batch_num
+    broker_config["batch_size"] = conf.producer_batch_size
+    broker_config["max_buffering"] = conf.producer_max_buffering
+    broker_config["flush_time"] = conf.producer_time_linger
+    broker_config["refresh_interval"] = conf.meta_refresh_interval
+
+    -- SSL/TLS configuration
+    broker_config["ssl"] = conf.ssl or false
+    broker_config["ssl_verify"] = conf.ssl_verify or false
+    broker_config["sasl"] = conf.sasl or false
+    broker_config["sasl_username"] = conf.sasl_username
+    broker_config["sasl_password"] = conf.sasl_password
+    broker_config["sasl_mechanism"] = conf.sasl_mechanism or "PLAIN"
+    broker_config["ssl_ca_location"] = conf.ssl_ca_location
+    broker_config["ssl_certificate_location"] = conf.ssl_certificate_location
+    broker_config["ssl_key_location"] = conf.ssl_key_location
+    broker_config["ssl_key_password"] = conf.ssl_key_password
+    broker_config["ssl_protocol"] = conf.ssl_protocol or "TLSv1.2"
+
+    -- Handle SASL config from individual brokers (for backward compatibility)
+    if conf.brokers and not conf.sasl then
+        for i, broker in ipairs(conf.brokers) do
+            if broker.sasl_config then
+                broker_config["sasl"] = true
+                broker_config["sasl_username"] = broker.sasl_config.user
+                broker_config["sasl_password"] = broker.sasl_config.password
+                broker_config["sasl_mechanism"] = broker.sasl_config.mechanism
+                break -- use first broker's SASL config
+            end
+        end
+    end
 
     core.log.info("kafka config - ssl: ", broker_config.ssl, 
                   ", sasl: ", broker_config.sasl,
@@ -399,10 +416,14 @@ function _M.log(conf, ctx)
         end
 
         if not data then
-            return false, "error occurred while encoding the data: " .. (jerr or "unknown")
+            core.log.error("failed to encode data for request: ", ctx.var.request_uri,
+                          ", error: ", jerr)
+            return false, "error occurred while encoding the data: " .. (jerr or "unknown") ..
+                          ", request: " .. ctx.var.request_uri
         end
 
-        core.log.info("send data to kafka, topic: ", conf.kafka_topic, 
+        core.log.info("sending data to kafka, topic: ", conf.kafka_topic, 
+                      ", request: ", ctx.var.request_uri,
                       ", data length: ", #data)
         return send_kafka_data(conf, ctx, prod, data)
     end
