@@ -65,18 +65,6 @@ local schema = {
             uniqueItems = true,
         },
 
-        broker_list = {
-            type = "array",
-            items = {
-                type = "object",
-                properties = {
-                    host = { type = "string" },
-                    port = { type = "integer", minimum = 1, maximum = 65535 },
-                },
-                required = {"host", "port"},
-            }
-        },
-
         kafka_topic   = { type = "string" },
 
         producer_type = {
@@ -178,11 +166,7 @@ local schema = {
         producer_time_linger  = { type = "integer", minimum = -1, default = -1 },
         meta_refresh_interval = { type = "integer", minimum = 1, default = 30 },
     },
-
-    oneOf = {
-        { required = {"broker_list", "kafka_topic"} },
-        { required = {"brokers", "kafka_topic"} },
-    },
+    required = {"brokers", "kafka_topic"},
 }
 
 local metadata_schema = {
@@ -283,7 +267,7 @@ local function send_kafka_data(conf, ctx, prod, log_message)
     local ok, err = prod:send(conf.kafka_topic, conf.key, log_message)
     if not ok then
         return false, "failed to send data to Kafka topic: " .. (err or "unknown") ..
-                      ", brokers: " .. core.json.encode(conf.broker_list)
+                      ", brokers: " .. core.json.encode(conf.brokers)
     end
     return true
 end
@@ -315,7 +299,7 @@ local function create_kafka_config(conf)
         ssl_protocol = conf.ssl_protocol,
     }
 
-    -- Handle SASL config from individual brokers (for backward compatibility)
+    -- Handle SASL config from individual brokers
     if conf.brokers and not conf.sasl then
         for i, broker in ipairs(conf.brokers) do
             if broker.sasl_config then
@@ -384,16 +368,8 @@ function _M.log(conf, ctx)
         return
     end
 
-    -- build broker list (reuse producer via lrucache to avoid unbalanced partitions)
+    -- Use only brokers (broker_list is deprecated)
     local broker_list = core.table.clone(conf.brokers or {})
-    local broker_config = {}
-
-    if conf.broker_list then
-        for _, host_port in pairs(conf.broker_list) do
-            local broker = { host = host_port.host, port = host_port.port }
-            core.table.insert(broker_list, broker)
-        end
-    end
 
     -- Create Kafka producer configuration
     local broker_config = create_kafka_config(conf)
