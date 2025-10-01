@@ -1,0 +1,17 @@
+routes:
+  - uri: /webapp/*
+    name: webapp-lb-route
+    methods: [GET, POST]
+    enable_websocket: true        # 👈 enable WebSocket proxying
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/webapp/(.*)", "/$1"]
+    upstream:
+      type: roundrobin
+      scheme: https
+      nodes:
+        "url1:port": 1
+        "url2:port": 1
+        "url3:port": 1
+      tls:
+        verify: false
