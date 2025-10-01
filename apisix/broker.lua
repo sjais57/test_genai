@@ -1,40 +1,25 @@
-function _M:connect()
-    local sock, err = ngx.socket.tcp()
-    if not sock then
-        return nil, "failed to create socket: " .. (err or "unknown")
-    end
-    sock:settimeout(self.conf.request_timeout or 1000)
-
-    local ok, cerr = sock:connect(self.host, self.port)
-    if not ok then
-        return nil, "failed to connect: " .. (cerr or "unknown")
-    end
-
-    -- SSL/TLS handling
-    if self.conf.ssl then
-        local ssock, serr = ssl.wrap(sock, {
-            mode        = "client",
-            protocol    = (self.conf.ssl_opts and self.conf.ssl_opts.protocol) or "tlsv1_2",
-            verify      = (self.conf.ssl_opts and self.conf.ssl_opts.verify) or "none",
-            cafile      = self.conf.ssl_opts and self.conf.ssl_opts.cafile,
-            certificate = self.conf.ssl_opts and self.conf.ssl_opts.certificate,
-            key         = self.conf.ssl_opts and self.conf.ssl_opts.key,
-        })
-
-        if not ssock then
-            return nil, "failed to wrap TLS: " .. (serr or "unknown")
-        end
-
-        local ok, herr = ssock:dohandshake()
+if self.config.ssl and times == 0 then
+    -- optional: load custom CA
+    if self.config.ssl_cafile then
+        local ok, err = sock:sslhandshake(false, self.host, self.config.ssl_verify, self.config.ssl_cafile)
         if not ok then
-            return nil, "TLS handshake failed: " .. (herr or "unknown")
+            return nil, "failed SSL handshake with CA at " .. self.config.ssl_cafile ..
+                        " err: " .. err, true
         end
-
-        self.sock = ssock
-        return ssock
+    else
+        local ok, err = sock:sslhandshake(false, self.host, self.config.ssl_verify)
+        if not ok then
+            return nil, "failed SSL handshake with " ..
+                        self.host .. ":" .. tostring(self.port) ..
+                        " err:" .. err, true
+        end
     end
 
-    -- default: plaintext
-    self.sock = sock
-    return sock
+    -- optional: client cert/key for mTLS
+    if self.config.ssl_cert and self.config.ssl_key then
+        local ok, err = sock:setclientcert(self.config.ssl_cert, self.config.ssl_key)
+        if not ok then
+            return nil, "failed to set client cert/key: " .. (err or "unknown"), true
+        end
+    end
 end
