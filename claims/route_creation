@@ -1,17 +1,35 @@
-routes:
-  - uri: /webapp/*
-    name: webapp-lb-route
-    methods: [GET, POST]
-    enable_websocket: true        # 👈 enable WebSocket proxying
-    plugins:
-      proxy-rewrite:
-        regex_uri: ["^/webapp/(.*)", "/$1"]
-    upstream:
-      type: roundrobin
-      scheme: https
-      nodes:
-        "url1:port": 1
-        "url2:port": 1
-        "url3:port": 1
-      tls:
-        verify: false
+{
+  "uri": "/webapp/*",
+  "name": "webapp-lb-route",
+  "methods": ["GET","POST","PUT","DELETE"],
+  "enable_websocket": false,
+  "plugins": {
+    "proxy-rewrite": { "regex_uri": ["^/webapp/(.*)", "/$1"] }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "pass_host": "rewrite",
+    "upstream_host": "my.backend.com",
+    "nodes": {
+      "url1:443": 1,
+      "url2:443": 1,
+      "url3:443": 1
+    },
+    "tls": {
+      "verify": false,
+      "sni": "my.backend.com"
+    },
+    "timeout": { "connect": 5, "send": 30, "read": 60 },
+    "checks": {
+      "active": {
+        "type": "http",
+        "timeout": 5,
+        "http_path": "/health",
+        "healthy": { "interval": 5, "successes": 2 },
+        "unhealthy": { "interval": 5, "http_failures": 2, "tcp_failures": 2, "timeouts": 1 }
+      }
+    },
+    "retries": 2
+  }
+}
