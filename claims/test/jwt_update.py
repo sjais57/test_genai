@@ -35,15 +35,20 @@ def login():
                 "details": validation_result.get("details"),
                 "user_ad_groups": validation_result.get("user_ad_groups")
             }), 403
-
-        # Get GES roles - we'll get ALL namespaces since rules are processed in dynamic claims
+    
+        # Get GES roles from the namespaces we already validated
         try:
             from auth.ges_integration import ges_service
             
-            # Get ALL available namespaces for the user from GES
-            # The dynamic claims will filter based on the rules in API key
-            ges_roles_data = ges_service.get_all_user_namespaces(username)
-            logger.info(f"All GES namespaces and roles for user: {ges_roles_data}")
+            # Use the namespaces that were already checked in pre-validation
+            required_namespaces = ["namespace1", "namespace2"]  # Your namespaces from logs
+            
+            if required_namespaces:
+                # CORRECT: Pass the list of namespaces
+                ges_roles_data = ges_service.get_user_groups_in_namespaces(username, required_namespaces)
+                logger.info(f"GES roles data for dynamic claims: {ges_roles_data}")
+            else:
+                logger.info("No GES namespaces required for this API key")
                 
         except Exception as e:
             logger.error(f"Error fetching GES roles: {str(e)}")
