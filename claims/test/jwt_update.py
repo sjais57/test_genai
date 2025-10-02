@@ -1,51 +1,131 @@
-# In your app_jwt_updated.py - Update the login function
-
-@app.route("/token", methods=["POST"])
+@app.route('/token', methods=['POST'])
 def login():
-    # ... your existing authentication code ...
-    
-    # After authentication, add this:
-    
-    # Get GES roles for dynamic claims
-    from auth.ges_integration import ges_service
-    
-    # Load API key to get namespaces
-    api_keys_dir = os.getenv("API_KEYS_DIR", "config/api_keys")
-    api_key_file = os.path.join(api_keys_dir, f"{api_key}.yaml")
-    
-    with open(api_key_file, 'r') as f:
-        api_key_config = yaml.safe_load(f)
-    
-    # Get namespaces from API key metadata
-    namespace_configs = api_key_config.get('metadata', {}).get('ges_namespaces', {})
-    namespaces_to_check = list(namespace_configs.keys())
-    
-    # Get user's roles from GES
-    ges_roles_data = {}
-    if namespaces_to_check:
-        ges_roles_data = ges_service.get_user_groups_in_namespaces(username, namespaces_to_check)
-        logger.info(f"GES roles data: {ges_roles_data}")
+    if not request.is_json:
+        return jsonify({"error": "Missing JSON in request"}), 400
 
-    # Create user context including GES roles
+    username = request.json.get("username")
+    password = request.json.get("password")
+    api_key = request.json.get("api_key")
+    custom_secret = request.json.get("secret")
+
+    if not username or not password:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    # Authenticate based on the configured method
+    if AUTH_METHOD == "ldap":
+        authenticated, user_data = authenticate_ldap(username, password)
+    else:
+        authenticated, user_data = authenticate_file(username, password)
+
+    if not authenticated:
+        error_message = user_data.get("error", "Invalid username or password")
+        return jsonify({"error": error_message}), 401
+
+    # Prepare group info
+    raw_groups = user_data.get("groups", [])
+    normalized_groups = extract_group_cn(raw_groups)
+
+    # API-key pre-validation (if provided)
+    ges_roles_data = {}
+    if api_key:
+        validation_result = user_pre_validation(api_key, normalized_groups, username)
+        if not validation_result["valid"]:
+            return jsonify({
+                "error": validation_result["message"],
+                "details": validation_result.get("details"),
+                "user_ad_groups": validation_result.get("user_ad_groups")
+            }), 403
+
+        # Get ALL GES namespaces for the user
+        try:
+            from auth.ges_integration import ges_service
+            
+            # Get ALL available namespaces for the user from GES
+            # This will return all namespaces where the user has any groups
+            ges_roles_data = ges_service.get_all_user_namespaces(username)
+            logger.info(f"All GES namespaces and roles for user: {ges_roles_data}")
+                
+        except Exception as e:
+            logger.error(f"Error fetching GES roles: {str(e)}")
+            ges_roles_data = {}
+
+    # Create a proper user context for dynamic claims
     user_context = {
         "user_id": username,
         "team_id": get_team_id_from_user(username, user_data),
         "groups": normalized_groups,
         "api_key_id": api_key,
-        # Add GES roles for dynamic claims
-        "ges_roles": ges_roles_data
+        "ges_roles": ges_roles_data  # Add ALL GES roles for dynamic claims
     }
 
-    # Get additional claims (this will now include the GES roles dynamic claim)
+    # Process API key (dynamic claims)
     if api_key:
+        logger.info(f"Processing API key with user context: {user_context}")
         api_key_claims = get_additional_claims(api_key, user_context)
     else:
         api_key_claims = get_additional_claims(None, user_context)
 
-    # Merge all claims
+    # Merge user data with additional claims
     claims = {**user_data, **api_key_claims}
-    
-    # Remove raw groups if needed
     claims.pop("groups", None)
-    
-    # ... rest of your token generation code ...
+
+    # Determine expiration time
+    expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]
+    if "exp_hours" in claims:
+        expires_delta = timedelta(hours=claims.pop("exp_hours"))
+
+    # If custom secret is provided, use PyJWT directly
+    if custom_secret:
+        import jwt
+        import datetime as dt
+        import uuid
+
+        logger.info("Using custom secret for token generation")
+        now = dt.datetime.now(dt.timezone.utc)
+        access_token_exp = now + expires_delta
+        refresh_token_exp = now + app.config["JWT_REFRESH_TOKEN_EXPIRES"]
+
+        access_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": access_token_exp,
+            "sub": username,
+            "type": "access",
+            "fresh": True,
+            **claims
+        }
+
+        refresh_payload = {
+            "iat": now,
+            "nbf": now,
+            "jti": str(uuid.uuid4()),
+            "exp": refresh_token_exp,
+            "sub": username,
+            "type": "refresh",
+            **claims
+        }
+
+        algorithm = app.config.get("JWT_ALGORITHM", "HS256")
+        access_token = jwt.encode(access_payload, custom_secret, algorithm=algorithm)
+        refresh_token = jwt.encode(refresh_payload, custom_secret, algorithm=algorithm)
+
+        return jsonify({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "note": "Tokens generated with custom secret"
+        }), 200
+
+    # Standard token creation
+    logger.info(f"Generated claims for user before creating tokens: username={username} claims={claims}")
+    access_token = create_access_token(
+        identity=username,
+        additional_claims=claims,
+        expires_delta=expires_delta,
+        fresh=True
+    )
+    refresh_token = create_refresh_token(
+        identity=username,
+        additional_claims=claims
+    )
+    return jsonify(access_token=access_token, refresh_token=refresh_token), 200
