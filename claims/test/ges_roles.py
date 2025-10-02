@@ -26,7 +26,7 @@ def get_ges_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     # Import here to avoid circular imports
     try:
-        from auth.ges_integration import ges_service
+        from auth.ges_auth import ges_service
     except ImportError as e:
         logger.error(f"Failed to import GES service: {e}")
         return {}
