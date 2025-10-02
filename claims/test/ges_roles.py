@@ -1,67 +1,103 @@
 # claims/ges_roles.py
 import logging
-from typing import Dict, Any, List
+from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
-def get_ges_roles(user_groups: Dict[str, List[str]], rules: List[Dict]) -> Dict[str, Any]:
+def get_ges_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    From the already-fetched GES groups (user_groups = {namespace: [roles,...]}),
-    select namespaces according to rules and emit their roles into JWT claims.
-
+    Dynamic claims function to fetch and process GES namespace roles
+    
     Args:
-      user_groups: dict like {"namespace2": ["TEST1", "TEST1.Access1", ...], ...}
-      rules: list of rules from API-key YAML, e.g.:
-        - { match_type: "exact", ges_namespace: "namespace2", value: { roles: [] } }
-
+        user_id: The username to look up
+        rules: List of rules from API key configuration
+        
     Returns:
-      dict of { <namespace>: { "roles": [...] }, ... }
+        Dictionary with namespace roles to be included in JWT claims
     """
-    claims: Dict[str, Any] = {}
-
-    try:
-        logger.info("PROCESSING GES NAMESPACE ROLES (dynamic claims)")
-        logger.info(f"All user GES data: {user_groups}")
-        logger.info(f"Filter rules: {rules}")
-
-        if not isinstance(user_groups, dict):
-            logger.warning("user_groups is not a dict; nothing to emit")
-            return {}
-
-        for rule in (rules or []):
-            mt = (rule or {}).get("match_type", "exact")
-            ns = (rule or {}).get("ges_namespace")
-            template = (rule or {}).get("value", {}) or {}
-
-            logger.info(f"Applying GES rule: match_type={mt} ges_namespace={ns}")
-
-            if mt == "exact" and ns:
-                roles = user_groups.get(ns, [])
-                if roles:
-                    out: Dict[str, Any] = {}
-                    # Only write keys present in template (today just 'roles')
-                    if "roles" in template:
-                        # keep order + de-dup
-                        seen, out_roles = set(), []
-                        for r in roles:
-                            if r not in seen:
-                                seen.add(r)
-                                out_roles.append(r)
-                        out["roles"] = out_roles
-                    claims[ns] = out
-                    logger.info(f"Emitting claims for '{ns}': {out}")
-                else:
-                    logger.info(f"No roles found for namespace '{ns}' in user data")
-
-            # (Optional) support prefix matches later:
-            # elif mt == "startswith" and ns:
-            #     for k, roles in user_groups.items():
-            #         if k.startswith(ns) and roles:
-            #             claims[k] = {"roles": list(dict.fromkeys(roles))}
-
-        logger.info(f"Final GES namespace roles claims: {claims}")
-        return claims
-
-    except Exception as e:
-        logger.error(f"Error in GES namespace roles extraction: {e}", exc_info=True)
+    result = {}
+    
+    if not user_id:
+        logger.error("No user_id provided for GES roles lookup")
         return {}
+    
+    logger.info(f"Starting GES roles lookup for user: {user_id}")
+    logger.info(f"Rules configuration: {rules}")
+    
+    # Import here to avoid circular imports
+    try:
+        from auth.ges_integration import ges_service
+    except ImportError as e:
+        logger.error(f"Failed to import GES service: {e}")
+        return {}
+    
+    # Extract required namespaces from rules
+    required_namespaces = []
+    for rule in rules:
+        namespace = rule.get('ges_namespace')
+        if namespace and namespace not in required_namespaces:
+            required_namespaces.append(namespace)
+    
+    if not required_namespaces:
+        logger.info("No GES namespaces specified in API key rules")
+        return {}
+    
+    logger.info(f"Required namespaces for GES lookup: {required_namespaces}")
+    
+    # Fetch GES roles for all required namespaces
+    try:
+        ges_roles_data = ges_service.get_user_groups_in_namespaces(user_id, required_namespaces)
+        logger.info(f"Fetched GES roles data: {ges_roles_data}")
+        
+        # Process each rule and apply matching logic
+        for rule in rules:
+            match_type = rule.get('match_type', 'exact')
+            ges_namespace = rule.get('ges_namespace')
+            value = rule.get('value', {})
+            
+            if not ges_namespace:
+                continue
+                
+            # Check if we have data for this namespace
+            if ges_namespace not in ges_roles_data:
+                logger.warning(f"No GES roles found for namespace: {ges_namespace}")
+                continue
+                
+            namespace_roles = ges_roles_data[ges_namespace]
+            logger.info(f"Processing namespace '{ges_namespace}' with roles: {namespace_roles}")
+            
+            # Apply matching logic
+            if match_type == "exact":
+                # For exact match, include all roles from that namespace
+                result[ges_namespace] = {
+                    "roles": namespace_roles
+                }
+            elif match_type == "filtered":
+                # Filter specific roles if specified
+                filter_roles = value.get("roles", [])
+                if filter_roles:
+                    filtered = [role for role in namespace_roles if role in filter_roles]
+                    result[ges_namespace] = {
+                        "roles": filtered
+                    }
+                    logger.info(f"Filtered roles for '{ges_namespace}': {filtered}")
+                else:
+                    # If no filter specified, include all roles
+                    result[ges_namespace] = {
+                        "roles": namespace_roles
+                    }
+            else:
+                # Default: include all roles
+                result[ges_namespace] = {
+                    "roles": namespace_roles
+                }
+                
+            logger.info(f"Final roles for namespace '{ges_namespace}': {result[ges_namespace]['roles']}")
+            
+    except Exception as e:
+        logger.error(f"Error fetching GES roles: {str(e)}", exc_info=True)
+        return {}
+    
+    final_result = {"ges_namespace_roles": result}
+    logger.info(f"Final GES roles result: {final_result}")
+    return final_result
