@@ -26,7 +26,8 @@ def get_ges_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     # Import here to avoid circular imports
     try:
-        from auth.ges_auth import ges_service
+        from auth.ges_integration import ges_service
+        logger.info("Successfully imported GES service")
     except ImportError as e:
         logger.error(f"Failed to import GES service: {e}")
         return {}
@@ -39,13 +40,14 @@ def get_ges_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
             required_namespaces.append(namespace)
     
     if not required_namespaces:
-        logger.info("No GES namespaces specified in API key rules")
+        logger.info("ℹ️ No GES namespaces specified in API key rules")
         return {}
     
     logger.info(f"Required namespaces for GES lookup: {required_namespaces}")
     
     # Fetch GES roles for all required namespaces
     try:
+        logger.info(f"Calling ges_service.get_user_groups_in_namespaces with: user={user_id}, namespaces={required_namespaces}")
         ges_roles_data = ges_service.get_user_groups_in_namespaces(user_id, required_namespaces)
         logger.info(f"Fetched GES roles data: {ges_roles_data}")
         
