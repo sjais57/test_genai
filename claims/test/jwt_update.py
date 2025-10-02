@@ -26,46 +26,26 @@ def login():
     normalized_groups = extract_group_cn(raw_groups)
 
     # API-key pre-validation (if provided)
-    ges_roles_data = {}
     if api_key:
-        validation_result = user_pre_validation(api_key, normalized_groups, username)
+        validation_result = check_pre_validation(api_key, normalized_groups)
         if not validation_result["valid"]:
             return jsonify({
                 "error": validation_result["message"],
                 "details": validation_result.get("details"),
                 "user_ad_groups": validation_result.get("user_ad_groups")
             }), 403
-    
-        # Get GES roles from the namespaces we already validated
-        try:
-            from auth.ges_integration import ges_service
-            
-            # Use the namespaces that were already checked in pre-validation
-            required_namespaces = ["namespace1", "namespace2"]  # Your namespaces from logs
-            
-            if required_namespaces:
-                # CORRECT: Pass the list of namespaces
-                ges_roles_data = ges_service.get_user_groups_in_namespaces(username, required_namespaces)
-                logger.info(f"GES roles data for dynamic claims: {ges_roles_data}")
-            else:
-                logger.info("No GES namespaces required for this API key")
-                
-        except Exception as e:
-            logger.error(f"Error fetching GES roles: {str(e)}")
-            ges_roles_data = {}
 
     # Create a proper user context for dynamic claims
     user_context = {
-        "user_id": username,
+        "user_id": username,  # This will be used by the GES function
         "team_id": get_team_id_from_user(username, user_data),
         "groups": normalized_groups,
         "api_key_id": api_key,
-        "ges_roles": ges_roles_data  # Add ALL GES roles for dynamic claims to filter
     }
 
-    # Process API key (dynamic claims) - this already loads the API key config
+    # Process API key (dynamic claims) - GES roles will be fetched here
     if api_key:
-        logger.info(f"Processing API key with user context: {user_context}")
+        logger.info(f"Processing API key with user_context: {user_context}")
         api_key_claims = get_additional_claims(api_key, user_context)
     else:
         api_key_claims = get_additional_claims(None, user_context)
@@ -73,6 +53,13 @@ def login():
     # Merge user data with additional claims
     claims = {**user_data, **api_key_claims}
     claims.pop("groups", None)
+
+    # Log the final claims to verify GES roles are included
+    logger.info(f"Final claims for JWT token - username={username}")
+    if 'ges_namespace_roles' in claims:
+        logger.info(f"GES roles included in token: {claims['ges_namespace_roles']}")
+    else:
+        logger.info("No GES roles in claims (might be expected if no API key or no GES config)")
 
     # Determine expiration time
     expires_delta = app.config["JWT_ACCESS_TOKEN_EXPIRES"]
