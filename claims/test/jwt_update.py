@@ -36,12 +36,12 @@ def login():
                 "user_ad_groups": validation_result.get("user_ad_groups")
             }), 403
 
-        # Get ALL GES namespaces for the user
+        # Get GES roles - we'll get ALL namespaces since rules are processed in dynamic claims
         try:
             from auth.ges_integration import ges_service
             
             # Get ALL available namespaces for the user from GES
-            # This will return all namespaces where the user has any groups
+            # The dynamic claims will filter based on the rules in API key
             ges_roles_data = ges_service.get_all_user_namespaces(username)
             logger.info(f"All GES namespaces and roles for user: {ges_roles_data}")
                 
@@ -55,10 +55,10 @@ def login():
         "team_id": get_team_id_from_user(username, user_data),
         "groups": normalized_groups,
         "api_key_id": api_key,
-        "ges_roles": ges_roles_data  # Add ALL GES roles for dynamic claims
+        "ges_roles": ges_roles_data  # Add ALL GES roles for dynamic claims to filter
     }
 
-    # Process API key (dynamic claims)
+    # Process API key (dynamic claims) - this already loads the API key config
     if api_key:
         logger.info(f"Processing API key with user context: {user_context}")
         api_key_claims = get_additional_claims(api_key, user_context)
