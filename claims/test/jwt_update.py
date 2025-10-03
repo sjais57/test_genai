@@ -121,3 +121,48 @@ def login():
         additional_claims=claims
     )
     return jsonify(access_token=access_token, refresh_token=refresh_token), 200
+
+
+# In your /token endpoint, add these debug logs:
+
+# After user_context creation
+logger.info("=" * 80)
+logger.info("🔑 DYNAMIC CLAIMS DEBUG INFO")
+logger.info("=" * 80)
+logger.info(f"📋 User context for dynamic claims: {user_context}")
+
+# Process API key claims
+if api_key:
+    logger.info(f"🔑 Processing API key: {api_key}")
+    logger.info(f"👤 User ID in context: {user_context.get('user_id')}")
+    
+    api_key_claims = get_additional_claims(api_key, user_context)
+    logger.info(f"📦 API key claims result: {api_key_claims}")
+    
+    # Debug: Check what's in the API key claims
+    if api_key_claims:
+        logger.info(f"🔍 API key claims keys: {list(api_key_claims.keys())}")
+        for key, value in api_key_claims.items():
+            logger.info(f"   - {key}: {type(value)} = {value}")
+    else:
+        logger.warning("🔍 No API key claims were returned")
+
+# Merge claims
+claims = {**user_data, **api_key_claims}
+claims.pop("groups", None)
+
+# Final check for GES roles
+logger.info("-" * 80)
+if 'ges_namespace_roles' in claims:
+    logger.info(f"SUCCESS: GES roles added to token!")
+    logger.info(f"GES roles data: {claims['ges_namespace_roles']}")
+else:
+    logger.error("FAILED: GES roles NOT found in final claims")
+    logger.info(f"All claims keys: {list(claims.keys())}")
+    
+    # Check if it's in api_key_claims but got overwritten
+    if 'ges_namespace_roles' in api_key_claims:
+        logger.error("GES roles WERE in api_key_claims but got overwritten by user_data!")
+    else:
+        logger.error("GES roles were never added to api_key_claims")
+logger.info("=" * 80)
