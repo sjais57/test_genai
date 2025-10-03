@@ -4,17 +4,17 @@ from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 
-def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
+def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
     """
     Dynamic claims function to fetch and process GES namespace roles
-    
-    Args:
-        user_id: The username to look up
-        rules: List of rules from API key configuration
-        
-    Returns:
-        Dictionary with namespace roles to be included in JWT claims
     """
+    logger.info("ENTERING get_ges_namespace_roles function")
+    logger.info(f"Parameters - user_id: {user_id}, rules: {rules}")
+    
+    # If metadata is passed in kwargs, log it (for debugging)
+    if 'metadata' in kwargs:
+        logger.info(f"Metadata received: {kwargs['metadata']}")
+    
     result = {}
     
     if not user_id:
@@ -40,7 +40,7 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[s
             required_namespaces.append(namespace)
     
     if not required_namespaces:
-        logger.info("ℹ️ No GES namespaces specified in API key rules")
+        logger.info("No GES namespaces specified in API key rules")
         return {}
     
     logger.info(f"Required namespaces for GES lookup: {required_namespaces}")
@@ -62,7 +62,7 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[s
                 
             # Check if we have data for this namespace
             if ges_namespace not in ges_roles_data:
-                logger.warning(f" No GES roles found for namespace: {ges_namespace}")
+                logger.warning(f"No GES roles found for namespace: {ges_namespace}")
                 continue
                 
             namespace_roles = ges_roles_data[ges_namespace]
@@ -82,7 +82,7 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[s
                     result[ges_namespace] = {
                         "roles": filtered
                     }
-                    logger.info(f"🔧 Filtered roles for '{ges_namespace}': {filtered}")
+                    logger.info(f"Filtered roles for '{ges_namespace}': {filtered}")
                 else:
                     # If no filter specified, include all roles
                     result[ges_namespace] = {
@@ -102,4 +102,5 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]]) -> Dict[s
     
     final_result = {"ges_namespace_roles": result}
     logger.info(f"Final GES roles result: {final_result}")
+    logger.info("EXITING get_ges_namespace_roles function")
     return final_result
