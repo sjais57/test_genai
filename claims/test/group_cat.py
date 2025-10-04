@@ -19,37 +19,36 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]], **kwargs)
     
     # Import here to avoid circular imports
     try:
-        from auth.ges_integration import ges_service, _safe_parse_groups
-        logger.info("Successfully imported GES service and parser")
+        from auth.ges_integration import ges_service
+        logger.info("Successfully imported GES service")
     except ImportError as e:
         logger.error(f"Failed to import GES service: {e}")
         return {}
     
     try:
+        # Extract namespaces from rules if provided
+        namespaces = []
+        for rule in rules:
+            namespace_value = rule.get('ges_namespace', '')
+            if namespace_value:
+                # Split comma-separated namespaces
+                namespaces.extend([ns.strip() for ns in namespace_value.split(',') if ns.strip()])
+        
+        # If no namespaces in rules, use None to let GES service handle defaults
+        if not namespaces:
+            namespaces = None
+            logger.info("No namespaces specified in rules, using defaults")
+        else:
+            logger.info(f"Using namespaces from rules: {namespaces}")
+        
         # Get both roles and groups in a single call
         logger.info(f"Calling ges_service.get_user_entitlements for user: {user_id}")
-        entitlements_data = ges_service.get_user_entitlements(user_id)
+        entitlements_data = ges_service.get_user_entitlements(user_id, namespaces)
         logger.info(f"Fetched GES entitlements data: {entitlements_data}")
         
-        # Parse the raw data using GES-specific parsing
-        raw_roles = entitlements_data.get("roles")
-        raw_groups = entitlements_data.get("groups")
-        
-        # Parse roles data
-        if raw_roles is not None:
-            roles_list = _safe_parse_groups(raw_roles)
-            logger.info(f"Processed roles: {roles_list}")
-        else:
-            roles_list = []
-            logger.info("No roles data found")
-        
-        # Parse groups data
-        if raw_groups is not None:
-            groups_list = _safe_parse_groups(raw_groups)
-            logger.info(f"Processed groups: {groups_list}")
-        else:
-            groups_list = []
-            logger.info("No groups data found")
+        # Directly use the parsed data from GES service
+        roles_list = entitlements_data.get("roles", [])
+        groups_list = entitlements_data.get("groups", [])
         
         final_result = {
             "ges_namespace_roles": {"roles": roles_list},
