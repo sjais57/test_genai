@@ -1,14 +1,16 @@
 # auth/ges_integration.py
-import logging, ast, json
-from typing import List, Dict, Any
-from ges_entitylements.security import EntitlementsService
+import logging
+import ast
+import json
+from typing import Dict, List, Any
+from ges_entitlements.security import EntitlementsService
 
 logger = logging.getLogger(__name__)
 
 def _safe_parse_groups(obj: Any) -> List[str]:
     """
-    Accepts: list | set | str(repr(list|set)) | {"namespace": <list|set|str>} | None
-    Returns: list[str]
+    Parse GES groups/roles data from various formats
+    This is GES-specific parsing logic
     """
     def _to_list(x):
         if x is None:
@@ -16,40 +18,30 @@ def _safe_parse_groups(obj: Any) -> List[str]:
         if isinstance(x, (list, tuple, set)):
             return [str(i) for i in x]
         if isinstance(x, dict):
-            # Common GES wrap: {"namespace": "['A','B']"} or {"namespace": ['A','B']}
             if "namespace" in x:
                 return _to_list(x["namespace"])
-            # Fall back to all values
             out = []
             for v in x.values():
                 out.extend(_to_list(v))
             return out
         if isinstance(x, str):
             s = x.strip()
-            # If string looks like a Python/JSON container, try parsing
             if (s.startswith('[') and s.endswith(']')) or (s.startswith('{') and s.endswith('}')):
-                # Try ast first (handles single quotes + sets)
                 try:
                     parsed = ast.literal_eval(s)
                     return _to_list(parsed)
                 except Exception:
-                    # Try JSON as a secondary path (requires double quotes / lists)
                     try:
                         parsed = json.loads(s)
                         return _to_list(parsed)
                     except Exception:
-                        # Fall-through to manual split for degenerate cases
                         pass
-            # Manual split on commas if user sent "A, B, C"
             if ',' in s and not s.startswith('{'):
                 return [p.strip().strip("'\"") for p in s.split(',') if p.strip()]
-            # Otherwise treat as single group token
             return [s.strip().strip("'\"")]
-        # Anything else → string it
         return [str(x)]
 
     items = _to_list(obj)
-    # de-dup while preserving order
     seen, out = set(), []
     for g in items:
         if g not in seen:
@@ -59,45 +51,57 @@ def _safe_parse_groups(obj: Any) -> List[str]:
 
 
 class GESService:
-    def __init__(self): ...
+    def __init__(self): 
+        self.hostname = "your-ges-server.com"
+        self.port = 8080
+        self.client_id = "your-client-id"
+        self.client_key = "your-client-key"
 
-    def get_user_groups_in_namespace(self, username: str, namespace: str) -> List[str]:
+    def get_user_entitlements(self, username: str) -> Dict[str, Any]:
         """
-        Get user's groups in a specific namespace. Handles list/set/str/dict variants.
+        Get user's roles and groups in a single call
         """
         try:
-            hostname = "your-ges-server.com"
-            port = 8080
-            client_id = "your-client-id"
-            client_key = "your-client-key"
-
-            logger.info(f"Checking GES groups for user '{username}' in namespace '{namespace}'")
-
+            logger.info(f"Getting GES entitlements for user: {username}")
+            
             ges_service = EntitlementsService(
-                hostname=hostname,
-                port=port,
-                namespace=namespace,
-                client_id=client_id,
-                client_key=client_key,
+                hostname=self.hostname,
+                port=self.port,
+                client_id=self.client_id,
+                client_key=self.client_key,
             )
-
-            raw = ges_service.get_roles(username)
-            logger.info(f"Raw GES response type: {type(raw)}")
-            logger.info(f"Raw GES response: {raw}")
-
-            group_list = _safe_parse_groups(raw)
-            logger.info(f"Processed groups: {group_list}")
-            return group_list
+            
+            # Get both roles and groups
+            raw_roles = ges_service.get_roles(username)
+            raw_groups = ges_service.get_groups(username)
+            
+            logger.info(f"Raw GES roles response: {raw_roles}")
+            logger.info(f"Raw GES groups response: {raw_groups}")
+            
+            return {
+                "roles": raw_roles,
+                "groups": raw_groups
+            }
+            
         except Exception as e:
-            logger.error(f"Error getting GES groups: {e}", exc_info=True)
-            return []
+            logger.error(f"Error getting GES entitlements for user {username}: {e}")
+            return {"roles": None, "groups": None}
 
-    def get_user_groups_in_namespaces(self, username: str, namespaces: List[str]) -> Dict[str, List[str]]:
-        results = {}
-        for ns in namespaces:
-            groups = self.get_user_groups_in_namespace(username, ns)
-            if groups:
-                results[ns] = groups
-        return results
+    # Keep individual functions for backward compatibility
+    def get_roles(self, username: str) -> Any:
+        """
+        Get user's roles only
+        """
+        entitlements = self.get_user_entitlements(username)
+        return entitlements.get("roles")
 
+    def get_groups(self, username: str) -> Any:
+        """
+        Get user's groups only  
+        """
+        entitlements = self.get_user_entitlements(username)
+        return entitlements.get("groups")
+
+
+# Global instance
 ges_service = GESService()
