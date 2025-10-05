@@ -85,3 +85,80 @@ def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]], **kwargs)
             "ges_namespace_roles": {"roles": []},
             "ges_namespace_groups": {"groups": []}
         }
+
+
+==================
+
+# claims/group_category.py
+import logging
+from typing import Dict, List, Any
+
+logger = logging.getLogger(__name__)
+
+def get_ges_namespace_roles(user_id: str, rules: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+    """
+    Simple function to get both roles and groups for JWT token
+    """
+    logger.info(f"Getting GES data for user: {user_id}")
+    
+    if not user_id:
+        logger.error("No user_id provided")
+        return {}
+    
+    # Import GES service
+    try:
+        from auth.ges_integration import ges_service
+    except ImportError as e:
+        logger.error(f"Failed to import GES service: {e}")
+        return {}
+    
+    try:
+        # Get namespaces from rules
+        namespaces = []
+        for rule in rules:
+            namespace_value = rule.get('ges_namespace', '')
+            if namespace_value:
+                namespaces.extend([ns.strip() for ns in namespace_value.split(',') if ns.strip()])
+        
+        if not namespaces:
+            logger.info("No GES namespaces specified")
+            return {
+                "ges_namespace_roles": {"roles": []},
+                "ges_namespace_groups": {"groups": []}
+            }
+        
+        # Get both roles and groups from all namespaces in one call
+        logger.info(f"Getting entitlements for namespaces: {namespaces}")
+        entitlements_data = ges_service.get_user_entitlements_in_namespaces(user_id, namespaces)
+        logger.info(f"Raw entitlements data: {entitlements_data}")
+        
+        # Combine roles from all namespaces
+        all_roles = []
+        all_groups = []
+        
+        for namespace, data in entitlements_data.items():
+            all_roles.extend(data["roles"])
+            all_groups.extend(data["groups"])
+        
+        # Remove duplicates
+        roles_list = list(dict.fromkeys(all_roles))
+        groups_list = list(dict.fromkeys(all_groups))
+        
+        logger.info(f"Final roles: {roles_list}")
+        logger.info(f"Final groups: {groups_list}")
+        
+        # Return both in JWT token
+        result = {
+            "ges_namespace_roles": {"roles": roles_list},
+            "ges_namespace_groups": {"groups": groups_list}
+        }
+        
+        logger.info(f"GES data result: {result}")
+        return result
+            
+    except Exception as e:
+        logger.error(f"Error getting GES data: {str(e)}")
+        return {
+            "ges_namespace_roles": {"roles": []},
+            "ges_namespace_groups": {"groups": []}
+        }
