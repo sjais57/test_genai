@@ -98,28 +98,63 @@ class GESService:
                 results[ns] = groups
         return results
 
-    def get_user_groups(self, username: str) -> List[str]:
+    def get_ges_namespace_groups(user_id: str, rules: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
         """
-        Simple method to get user's groups (not namespace-specific)
+        Dynamic claims function to fetch and combine GES groups across namespaces.
+        Returns: {"groups": [ ...unique groups... ]}
         """
+        logger.info("ENTERING get_ges_namespace_groups function")
+        logger.info(f"Parameters - user_id: {user_id}, rules: {rules}")
+        if 'metadata' in kwargs:
+            logger.info(f"Metadata received: {kwargs['metadata']}")
+        if not user_id:
+            logger.error("No user_id provided for GES groups lookup")
+            return {}
+    
+        # Import late to avoid circulars
         try:
-            logger.info(f"Getting GES groups for user '{username}'")
-
-            ges_service = EntitlementsService(
-                hostname=self.hostname,
-                port=self.port,
-                client_id=self.client_id,
-                client_key=self.client_key,
-            )
-
-            raw = ges_service.get_groups(username)
-            logger.info(f"Raw GES groups response: {raw}")
-
-            groups_list = _safe_parse_groups(raw)
-            logger.info(f"Processed groups: {groups_list}")
-            return groups_list
+            from auth.ges_integration import ges_service
+            logger.info("Successfully imported GES service")
+        except ImportError as e:
+            logger.error(f"Failed to import GES service: {e}")
+            return {}
+    
+        # Parse namespaces (support comma-separated)
+        required_namespaces: List[str] = []
+        for rule in rules or []:
+            ns_val = (rule or {}).get("ges_namespace", "")
+            if ns_val:
+                for ns in [p.strip() for p in ns_val.split(",") if p.strip()]:
+                    if ns not in required_namespaces:
+                        required_namespaces.append(ns)
+        if not required_namespaces:
+            logger.info("No GES namespaces specified in API key rules for groups")
+            return {}
+    
+        logger.info(f"Required namespaces for GES groups: {required_namespaces}")
+        try:
+            # Fetch groups per-namespace
+            logger.info(f"Calling ges_service.get_user_groups_in_namespaces: user={user_id}, namespaces={required_namespaces}")
+            ns_to_groups = ges_service.get_user_groups_in_namespaces(user_id, required_namespaces)
+            logger.info(f"Fetched GES groups data: {ns_to_groups}")
+    
+            # Flatten + de-dup preserving order
+            all_groups: List[str] = []
+            seen = set()
+            for ns in required_namespaces:
+                groups = ns_to_groups.get(ns, [])
+                logger.info(f"Processing namespace '{ns}' groups: {groups}")
+                for g in groups:
+                    if g not in seen:
+                        seen.add(g)
+                        all_groups.append(g)
+    
+            final_result = {"groups": all_groups}
+            logger.info(f"Final groups result: {final_result}")
+            logger.info("EXITING get_ges_namespace_groups function")
+            return final_result
         except Exception as e:
-            logger.error(f"Error getting GES groups: {e}", exc_info=True)
-            return []
+            logger.error(f"Error fetching GES groups: {str(e)}", exc_info=True)
+            return {}
 
 ges_service = GESService()
