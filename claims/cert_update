@@ -1,0 +1,339 @@
+"""
+DSP-FD2: Unified Front Door Service with SSL Support
+"""
+
+import asyncio
+import hashlib
+import importlib
+import json
+import logging
+import os
+import sys
+import time
+import ssl
+import certifi
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple, List
+from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from enum import Enum
+
+# Get project root (where .env is located)
+project_root = Path(__file__).parent.parent
+
+# Add project root and src directory to Python path
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+
+# Configure logging
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logs_dir = project_root / "logs"
+logs_dir.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(logs_dir / "front_door.log", mode="a")
+    ]
+)
+logger = logging.getLogger("DSP-FD2")
+
+import httpx
+from fastapi import FastAPI, Request, Response, HTTPException, Header
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+# Import APISIX client
+from apisix_client import APISIXClient
+
+# ... (rest of your imports remain the same)
+
+class UnifiedFrontDoorConfig(BaseModel):
+    """Configuration for unified Front Door service"""
+    # Control Tower
+    control_tower_url: str = Field(..., description="Control Tower API URL")
+    control_tower_secret: Optional[str] = Field(None, description="Control Tower auth secret")
+    
+    # APISIX (optional)
+    apisix_admin_url: Optional[str] = Field(None, description="APISIX Admin API URL")
+    apisix_admin_key: Optional[str] = Field(None, description="APISIX Admin API key")
+    apisix_gateway_url: Optional[str] = Field(None, description="APISIX Gateway URL")
+    
+    # Module management
+    module_pool_size: int = Field(default=10, description="Maximum modules in pool")
+    
+    # SSL Configuration
+    ssl_cert_file: Optional[str] = Field(None, description="SSL certificate file path")
+    ssl_key_file: Optional[str] = Field(None, description="SSL private key file path")
+    ssl_ca_bundle: Optional[str] = Field(None, description="SSL CA bundle file path")
+    verify_ssl: bool = Field(default=True, description="Verify SSL certificates")
+    
+    # General settings
+    environment: str = Field(default="production")
+    request_timeout: float = Field(default=30.0)
+    redis_url: Optional[str] = Field(None, description="Redis URL for caching")
+    auto_configure_apisix: bool = Field(default=True, description="Auto-configure APISIX on startup")
+    cache_ttl: int = Field(default=300, description="Cache TTL in seconds")
+
+class UnifiedFrontDoorService:
+    """Unified Front Door service with intelligent routing and SSL support"""
+    
+    def __init__(self, config: UnifiedFrontDoorConfig):
+        self.config = config
+        self.module_manager = ModuleManager(config) if BaseModule else None
+        self.apisix_client = None
+        self.http_client: Optional[httpx.AsyncClient] = None
+        self.redis_client = None
+        
+        # Convert relative paths to absolute
+        if config.ssl_cert_file and not os.path.isabs(config.ssl_cert_file):
+            self.ssl_cert_file = project_root / config.ssl_cert_file
+        else:
+            self.ssl_cert_file = config.ssl_cert_file
+            
+        if config.ssl_key_file and not os.path.isabs(config.ssl_key_file):
+            self.ssl_key_file = project_root / config.ssl_key_file
+        else:
+            self.ssl_key_file = config.ssl_key_file
+            
+        if config.ssl_ca_bundle and not os.path.isabs(config.ssl_ca_bundle):
+            self.ssl_ca_bundle = project_root / config.ssl_ca_bundle
+        else:
+            self.ssl_ca_bundle = config.ssl_ca_bundle
+        
+        # Initialize APISIX client if configured
+        if config.apisix_admin_url and config.apisix_admin_key:
+            self.apisix_client = APISIXClient(
+                admin_url=config.apisix_admin_url,
+                admin_key=config.apisix_admin_key
+            )
+    
+    async def initialize(self):
+        """Initialize service connections with SSL"""
+        # Create SSL context
+        ssl_context = await self._create_ssl_context()
+        
+        self.http_client = httpx.AsyncClient(
+            timeout=self.config.request_timeout,
+            verify=ssl_context
+        )
+        
+        # Redis for caching (optional)
+        if redis and self.config.redis_url:
+            try:
+                self.redis_client = redis.from_url(self.config.redis_url)
+                await self.redis_client.ping()
+                logger.info("Redis connection successful")
+            except Exception as e:
+                logger.warning(f"Failed to connect to Redis: {e}")
+                self.redis_client = None
+        
+        # Auto-configure APISIX routes if enabled
+        if self.config.auto_configure_apisix and self.apisix_client:
+            logger.info("Auto-configuring APISIX routes from Control Tower manifests")
+            await self.sync_manifests()
+    
+    async def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context for production"""
+        if not self.config.verify_ssl:
+            logger.warning("SSL verification is disabled")
+            return False
+        
+        try:
+            ssl_context = ssl.create_default_context(
+                purpose=ssl.Purpose.SERVER_AUTH,
+                cafile=certifi.where()
+            )
+            
+            # Load custom CA bundle if provided and exists
+            if self.ssl_ca_bundle and os.path.exists(self.ssl_ca_bundle):
+                ssl_context.load_verify_locations(cafile=str(self.ssl_ca_bundle))
+                logger.info(f"Loaded custom CA bundle from {self.ssl_ca_bundle}")
+            else:
+                logger.info("Using default CA bundle")
+            
+            # Load client certificates if provided and exist
+            if (self.ssl_cert_file and self.ssl_key_file and 
+                os.path.exists(self.ssl_cert_file) and 
+                os.path.exists(self.ssl_key_file)):
+                
+                ssl_context.load_cert_chain(
+                    certfile=str(self.ssl_cert_file),
+                    keyfile=str(self.ssl_key_file)
+                )
+                logger.info(f"Loaded client certificates: {self.ssl_cert_file}")
+            
+            # Security settings
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            
+            return ssl_context
+            
+        except Exception as e:
+            logger.error(f"Failed to create SSL context: {e}")
+            # Fall back to default verification
+            return True
+
+    # ... (rest of your UnifiedFrontDoorService methods remain the same)
+
+# FastAPI app with lifespan management
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await app.state.front_door.initialize()
+    yield
+    # Shutdown
+    await app.state.front_door.shutdown()
+
+# Create FastAPI app
+app = FastAPI(
+    title="DSP-FD2 Front Door",
+    description="Front Door service with intelligent routing and SSL support",
+    version="3.0.0",
+    lifespan=lifespan
+)
+
+# Initialize unified Front Door service
+config = UnifiedFrontDoorConfig(
+    control_tower_url=os.getenv("CONTROL_TOWER_URL", "https://localhost:8000"),
+    control_tower_secret=os.getenv("CONTROL_TOWER_SECRET"),
+    apisix_admin_url=os.getenv("APISIX_ADMIN_URL", "https://localhost:9180"),
+    apisix_admin_key=os.getenv("APISIX_ADMIN_KEY", "edd1c9f034335f136f87ad84b625c8f1"),
+    apisix_gateway_url=os.getenv("APISIX_GATEWAY_URL", "https://localhost:9080"),
+    module_pool_size=int(os.getenv("MODULE_POOL_SIZE", "10")),
+    environment=os.getenv("ENVIRONMENT", "production"),
+    redis_url=os.getenv("REDIS_URL"),
+    auto_configure_apisix=os.getenv("AUTO_CONFIGURE_APISIX", "true").lower() == "true",
+    cache_ttl=int(os.getenv("CACHE_TTL", "300")),
+    request_timeout=float(os.getenv("REQUEST_TIMEOUT", "30.0")),
+    ssl_cert_file=os.getenv("SSL_CERT_FILE"),
+    ssl_key_file=os.getenv("SSL_KEY_FILE"),
+    ssl_ca_bundle=os.getenv("SSL_CA_BUNDLE"),
+    verify_ssl=os.getenv("VERIFY_SSL", "true").lower() == "true"
+)
+
+app.state.front_door = UnifiedFrontDoorService(config)
+
+# ... (rest of your FastAPI routes remain the same)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("front_door:app", host="0.0.0.0", port=8080, reload=True)
+
+
+=======
+  run.py:
+#!/usr/bin/env python3
+"""
+DSP-FD2 Startup Script with SSL Support
+"""
+
+import sys
+import os
+import ssl
+from pathlib import Path
+
+# Get project root (where .env is located)
+project_root = Path(__file__).parent
+
+# Add project root to Python path
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+# Set PYTHONPATH
+current_pythonpath = os.environ.get('PYTHONPATH', '')
+if str(project_root) not in current_pythonpath:
+    if current_pythonpath:
+        os.environ['PYTHONPATH'] = f"{project_root}{os.pathsep}{current_pythonpath}"
+    else:
+        os.environ['PYTHONPATH'] = str(project_root)
+
+def verify_ssl_files():
+    """Verify SSL certificate files exist with relative paths"""
+    ssl_cert_file = os.getenv("SSL_CERT_FILE")
+    ssl_key_file = os.getenv("SSL_KEY_FILE")
+    
+    # Make paths absolute relative to project root
+    if ssl_cert_file and not os.path.isabs(ssl_cert_file):
+        ssl_cert_file = project_root / ssl_cert_file
+    
+    if ssl_key_file and not os.path.isabs(ssl_key_file):
+        ssl_key_file = project_root / ssl_key_file
+    
+    if not ssl_cert_file or not os.path.exists(ssl_cert_file):
+        raise FileNotFoundError(f"SSL certificate file not found: {ssl_cert_file}")
+    
+    if not ssl_key_file or not os.path.exists(ssl_key_file):
+        raise FileNotFoundError(f"SSL key file not found: {ssl_key_file}")
+    
+    print(f"✓ SSL Certificate: {ssl_cert_file}")
+    print(f"✓ SSL Private Key: {ssl_key_file}")
+    
+    return str(ssl_cert_file), str(ssl_key_file)
+
+if __name__ == "__main__":
+    # Load environment variables from .env in project root
+    from dotenv import load_dotenv
+    env_path = project_root / '.env'
+    load_dotenv(env_path)
+    
+    import uvicorn
+    
+    # Get configuration from environment
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8443"))
+    reload = os.getenv("RELOAD", "false").lower() == "true"
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    workers = int(os.getenv("WORKERS", "1"))
+    verify_ssl = os.getenv("VERIFY_SSL", "true").lower() == "true"
+    
+    # SSL configuration
+    ssl_certfile, ssl_keyfile = None, None
+    
+    if verify_ssl:
+        try:
+            ssl_certfile, ssl_keyfile = verify_ssl_files()
+            
+            # Create SSL context for production
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(ssl_certfile, ssl_keyfile)
+            
+            # Security hardening
+            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            ssl_context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
+            
+        except Exception as e:
+            print(f"⚠ SSL configuration failed: {e}")
+            print("⚠ Falling back to HTTP")
+            ssl_certfile, ssl_keyfile = None, None
+    
+    print(f"Starting DSP-FD2 on {host}:{port}")
+    print(f"SSL: {'Enabled' if ssl_certfile else 'Disabled'}")
+    print(f"Reload: {reload}, Workers: {workers}, Log Level: {log_level}")
+    
+    if reload or workers == 1:
+        # Development mode - single process with optional reload
+        uvicorn.run(
+            "src.front_door:app",
+            host=host,
+            port=port,
+            reload=reload,
+            log_level=log_level,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile
+        )
+    else:
+        # Production mode - multiple workers
+        uvicorn.run(
+            "src.front_door:app",
+            host=host,
+            port=port,
+            workers=workers,
+            log_level=log_level,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile
+        )
