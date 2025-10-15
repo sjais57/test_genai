@@ -1,0 +1,211 @@
+{
+  "project_id": "sas2py",
+  "project_name": "SAS to Python Code Conversion",
+  "owner": "AMI",
+  "environment": "development",
+  "modules": [
+    {
+      "module_type": "jwt_config",
+      "name": "simple-auth",
+      "config": {
+        "id": "sas2py-jwt-config",
+        "owner": "SAS2PY Team",
+        "service_url": "${environments.${environment}.urls.jwt_service_url}",
+        "claims": {
+          "static": {
+            "key": "sas2py-consumer-key",
+            "rate_limit": 100,
+            "project": "sas2py",
+            "environment": "${environment}",
+            "exp_hours": 1
+          }
+        }
+      }
+    },
+    {
+      "module_type": "jwt_config",
+      "name": "jwe-auth",
+      "config": {
+        "id": "sas2py-jwe-jwt-config",
+        "owner": "SAS2PY Team",
+        "service_url": "${environments.${environment}.urls.jwt_service_url}",
+        "jwe_config": {
+          "enabled": true,
+          "encryption_key": "${environments.${environment}.secrets.jwe_encryption_key}",
+          "algorithm": "dir",
+          "encryption": "A256GCM",
+          "compression": null
+        },
+        "claims": {
+          "static": {
+            "key": "sas2py-jwe-consumer-key"
+          }
+        }
+      }
+    },
+    {
+      "module_type": "inference_endpoint",
+      "name": "convert",
+      "dependencies": ["simple-auth", "apisix-convert-route"],
+      "config": {
+        "model_name": "llama-3.1-70b-versatile",
+        "endpoint_url": "${environments.${environment}.urls.api_base_url}/sas2py/convert",
+        "system_prompt": "You are an expert SAS to Python code converter. Convert SAS code to equivalent Python code using pandas.",
+        "max_tokens": 2000,
+        "temperature": 0.3
+      }
+    },
+    {
+      "module_type": "inference_endpoint",
+      "name": "test",
+      "dependencies": ["simple-auth", "apisix-test-route"],
+      "config": {
+        "model_name": "llama-3.1-8b-instant",
+        "endpoint_url": "${environments.${environment}.urls.api_base_url}/sas2py/test",
+        "system_prompt": "You are a Python testing expert. Generate unit tests for the provided code.",
+        "max_tokens": 1500,
+        "temperature": 0.5
+      }
+    },
+    {
+      "module_type": "api_gateway",
+      "name": "apisix-convert-route",
+      "dependencies": ["convert", "simple-auth", "langfuse-observability"],
+      "config": {
+        "gateway_type": "apisix",
+        "consumer": {
+          "username": "consumer",
+          "desc": "Consumer for SAS2PY project",
+          "plugins": {
+            "jwt-auth": {
+              "key": "sas2py-consumer-key",
+              "secret": "${environments.${environment}.secrets.jwt_secret_key}"
+            }
+          }
+        },
+        "service": {
+          "id": "service",
+          "name": "api-service",
+          "desc": "API Service for SAS to Python Code Conversion"
+        },
+        "routes": [
+          {
+            "name": "convert",
+            "uri": "/sas2py/convert",
+            "methods": ["POST"],
+            "upstream": {
+              "type": "roundrobin",
+              "nodes": {
+                "${environments.${environment}.urls.groq_base_url}": 1
+              },
+              "timeout": {
+                "connect": 60,
+                "send": 60,
+                "read": 60
+              }
+            },
+            "plugins": {
+              "jwt-auth": {},
+              "request-id": {
+                "header_name": "X-Request-Id",
+                "include_in_response": true,
+                "algorithm": "uuid"
+              },
+              "prometheus": {
+                "prefer_name": true
+              },
+              "ai-prompt-template": {
+                "templates": [
+                  {
+                    "name": "converter",
+                    "template": {
+                      "model": "llama-3.1-8b-instant",
+                      "messages": [
+                        {
+                          "role": "system",
+                          "content": "You are an expert SAS to Python code converter. Convert SAS code to equivalent Python code using pandas, numpy, and other standard libraries. Maintain the same logic and output format."
+                        },
+                        {
+                          "role": "user",
+                          "content": "{{user_input}}"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "_meta": {
+                  "priority": 2520
+                }
+              },
+              "proxy-rewrite": {
+                "uri": "/openai/v1/chat/completions",
+                "host": "api.groq.com",
+                "headers": {
+                  "Authorization": "Bearer ${environments.common.secrets.groq_api_key}",
+                  "Accept-Encoding": "identity"
+                }
+              },
+              "response-rewrite": {
+                "headers": {
+                  "remove": ["Content-Encoding"]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "environments": {
+    "common": {
+      "secrets": {
+        "groq_api_key": "config:api_keys.groq"
+      }
+    },
+    "development": {
+      "secrets": {
+        "jwt_secret_key": "your-secret-key-here",
+        "jwe_encryption_key": "key-length-should-be-32-chars123",
+        "langfuse_public_key": "${LANGFUSE_PUBLIC_KEY}",
+        "langfuse_secret_key": "${LANGFUSE_SECRET_KEY}"
+      },
+      "urls": {
+        "groq_base_url": "api.groq.com",
+        "api_base_url": "http://localhost:8000",
+        "jwt_service_url": "http://localhost:5000",
+        "langfuse_host": "https://cloud.langfuse.com",
+        "langfuse_otel_endpoint": "https://cloud.langfuse.com/api/public/otel/v1/traces"
+      }
+    },
+    "staging": {
+      "secrets": {
+        "jwt_secret_key": "${STAGING_JWT_SECRET}",
+        "jwe_encryption_key": "${STAGING_JWE_ENCRYPTION_KEY}",
+        "langfuse_public_key": "${LANGFUSE_PUBLIC_KEY}",
+        "langfuse_secret_key": "${LANGFUSE_SECRET_KEY}"
+      },
+      "urls": {
+        "groq_base_url": "api.groq.com",
+        "api_base_url": "https://staging-api.example.com",
+        "jwt_service_url": "http://localhost:5000",
+        "langfuse_host": "https://cloud.langfuse.com",
+        "langfuse_otel_endpoint": "https://cloud.langfuse.com/api/public/otel/v1/traces"
+      }
+    },
+    "production": {
+      "secrets": {
+        "jwt_secret_key": "${PROD_JWT_SECRET}",
+        "jwe_encryption_key": "${PROD_JWE_ENCRYPTION_KEY}",
+        "langfuse_public_key": "${LANGFUSE_PUBLIC_KEY}",
+        "langfuse_secret_key": "${LANGFUSE_SECRET_KEY}"
+      },
+      "urls": {
+        "groq_base_url": "api.groq.com",
+        "api_base_url": "https://api.example.com",
+        "jwt_service_url": "http://localhost:5000",
+        "langfuse_host": "https://cloud.langfuse.com",
+        "langfuse_otel_endpoint": "https://cloud.langfuse.com/api/public/otel/v1/traces"
+      }
+    }
+  }
+}
