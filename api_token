@@ -1,71 +1,68 @@
-"serverless-pre-function": {
-  "phase": "access",
-  "_meta": { "priority": 1000 },
-  "functions": [
-    "return function(conf, ctx) \
-      local cjson = require('cjson.safe'); \
-      local ngx = ngx; \
-      local ngx_req = ngx.req; \
-      local function b64_url_decode(input) \
-        if not input then return nil end; \
-        input = input:gsub('-', '+'):gsub('_', '/'); \
-        local mod = #input % 4; \
-        if mod == 2 then input = input .. '=='; \
-        elseif mod == 3 then input = input .. '='; \
-        elseif mod == 1 then return nil end; \
-        local ok, decoded = pcall(ngx.decode_base64, input); \
-        if not ok then return nil end; \
-        return decoded; \
-      end; \
-      local claims = nil; \
-      if ctx and ctx.var and ctx.var.jwt_payload then \
-        claims = ctx.var.jwt_payload; \
-      elseif ctx and ctx.authenticated_jwt then \
-        claims = ctx.authenticated_jwt; \
-      elseif ngx.ctx and ngx.ctx.jwt_payload then \
-        claims = ngx.ctx.jwt_payload; \
-      elseif ngx.ctx and ngx.ctx.authenticated_jwt then \
-        claims = ngx.ctx.authenticated_jwt; \
-      end; \
-      if type(claims) == 'string' then \
-        local parsed = cjson.decode(claims); \
-        if parsed then claims = parsed end; \
-      end; \
-      if not claims then \
-        local auth = ngx_req.get_headers()['Authorization'] or ngx_req.get_headers()['authorization']; \
-        if auth and type(auth) == 'string' then \
-          local m = auth:match('^%s*Bearer%s+(.+)%s*$') or auth:match('^%s*JWT%s+(.+)%s*$'); \
-          if m then \
-            local parts = {}; \
-            for p in m:gmatch('[^%.]+') do table.insert(parts, p) end; \
-            if #parts >= 2 then \
-              local payload = b64_url_decode(parts[2]); \
-              if payload then \
-                local parsed = cjson.decode(payload); \
-                if parsed then claims = parsed end; \
-              end; \
-            end; \
-          end; \
-        end; \
-      end; \
-      local fedsso = nil; \
-      if type(claims) == 'table' then \
-        fedsso = claims['fedsso_tkn'] or claims['fedssoToken'] or claims['fedsso']; \
-      end; \
-      if fedsso and type(fedsso) == 'string' and #fedsso > 0 then \
-        ngx_req.set_header('Authorization', 'Bearer ' .. fedsso); \
-        ngx.log(ngx.INFO, 'Authorization header replaced with fedsso_tkn'); \
-      else \
-        ngx.log(ngx.WARN, 'fedsso_tkn not found in JWT claims'); \
-      end; \
-    end"
-  ]
-},
-"proxy-rewrite": {
-  "uri": "/openai/v1/chat/completions",
-  "host": "api.groq.com",
-  "headers": {
-    "Authorization": "Bearer ${fedsso_tkn}",
-    "Accept-Encoding": "identity"
+{
+  "name": "test",
+  "uri": "/sas2py/test",
+  "methods": ["POST"],
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "${environments.${environment}.urls.groq_base_url}": 1
+    },
+    "timeout": {
+      "connect": 60,
+      "send": 60,
+      "read": 60
+    }
+  },
+  "plugins": {
+    "jwt-auth": {
+      "secret": "your-jwt-secret-here",
+      "key": "Authorization",
+      "algorithm": "HS256"
+    },
+    "request-id": {
+      "header_name": "X-Request-Id",
+      "include_in_response": true,
+      "algorithm": "uuid"
+    },
+    "prometheus": {
+      "prefer_name": true
+    },
+    "ai-prompt-template": {
+      "templates": [
+        {
+          "name": "python-test-generator",
+          "template": {
+            "model": "llama-3.1-8b-instant",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a Python testing expert. Generate comprehensive unit tests for the provided Python code using pytest. Include edge cases and assertions."
+              },
+              {
+                "role": "user",
+                "content": "{{user_input}}"
+              }
+            ]
+          }
+        }
+      ],
+      "_meta": {
+        "priority": 2520
+      }
+    },
+    "proxy-rewrite": {
+      "uri": "/openai/v1/chat/completions",
+      "host": "api.groq.com",
+      "headers": {
+        "Accept-Encoding": "identity"
+        // Authorization header REMOVED - will be set by Lua script
+      }
+    },
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "return function(conf, ctx)\n  local jwt = require('resty.jwt')\n  local cjson = require('cjson.safe')\n  \n  -- Get the JWT token from the Authorization header\n  local auth_header = ngx.req.get_headers()['Authorization']\n  \n  if not auth_header then\n    ngx.log(ngx.ERR, '[JWT-EXTRACT] No Authorization header found')\n    ngx.header['Content-Type'] = 'application/json'\n    ngx.status = 401\n    ngx.say(cjson.encode({\n      error = 'Unauthorized',\n      message = 'No Authorization header provided'\n    }))\n    return ngx.exit(401)\n  end\n  \n  -- Extract Bearer token\n  local bearer, token = string.match(auth_header, '^(Bearer)%s+(.+)$')\n  if not bearer or not token then\n    ngx.log(ngx.ERR, '[JWT-EXTRACT] Invalid Authorization header format. Expected: Bearer <token>')\n    ngx.header['Content-Type'] = 'application/json'\n    ngx.status = 401\n    ngx.say(cjson.encode({\n      error = 'Unauthorized',\n      message = 'Invalid Authorization header format. Expected: Bearer <token>'\n    }))\n    return ngx.exit(401)\n  end\n  \n  ngx.log(ngx.INFO, '[JWT-EXTRACT] JWT token found, attempting to decode')\n  \n  -- Decode the JWT token (without verification for extraction)\n  local jwt_obj, err = jwt:load_jwt(token)\n  \n  if not jwt_obj then\n    ngx.log(ngx.ERR, '[JWT-EXTRACT] Failed to load JWT token: ', err)\n    ngx.header['Content-Type'] = 'application/json'\n    ngx.status = 401\n    ngx.say(cjson.encode({\n      error = 'Unauthorized',\n      message = 'Invalid JWT token format'\n    }))\n    return ngx.exit(401)\n  end\n  \n  if not jwt_obj.valid then\n    ngx.log(ngx.ERR, '[JWT-EXTRACT] Invalid JWT token: ', jwt_obj.reason)\n    ngx.header['Content-Type'] = 'application/json'\n    ngx.status = 401\n    ngx.say(cjson.encode({\n      error = 'Unauthorized',\n      message = 'Invalid JWT token: ' .. (jwt_obj.reason or 'unknown error')\n    }))\n    return ngx.exit(401)\n  end\n  \n  -- Extract fedsso_tkn from JWT payload\n  local fedsso_tkn = jwt_obj.payload.fedsso_tkn\n  \n  if not fedsso_tkn then\n    ngx.log(ngx.ERR, '[JWT-EXTRACT] fedsso_tkn not found in JWT payload. Available claims: ', cjson.encode(jwt_obj.payload))\n    ngx.header['Content-Type'] = 'application/json'\n    ngx.status = 401\n    ngx.say(cjson.encode({\n      error = 'Unauthorized',\n      message = 'fedsso_tkn claim not found in JWT token'\n    }))\n    return ngx.exit(401)\n  end\n  \n  ngx.log(ngx.INFO, '[JWT-EXTRACT] Successfully extracted fedsso_tkn from JWT')\n  \n  -- Set the Authorization header for the upstream request with fedsso_tkn\n  ngx.req.set_header('Authorization', 'Bearer ' .. fedsso_tkn)\n  \n  -- Log successful processing (without exposing the actual token)\n  ngx.log(ngx.INFO, '[JWT-EXTRACT] Authorization header set with fedsso_tkn for upstream request')\n  \n  return\nend"
+      ]
+    }
   }
 }
