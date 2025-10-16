@@ -1,0 +1,65 @@
+local jwt = require("resty.jwt")
+local cjson = require("cjson.safe")
+
+local plugin_name = "jwe-decrypt"
+
+local _M = {
+    version = 0.1,
+    priority = 2520,
+    name = plugin_name,
+    schema = {
+        type = "object",
+        properties = {
+            key = { type = "string", default = "Authorization" },
+            secret = { type = "string", description = "Optional shared secret for verifying JWT" },
+            algorithm = { type = "string", default = "HS256" }
+        }
+    }
+}
+
+-- called during access phase
+function _M.access(conf, ctx)
+    local auth_header = ngx.req.get_headers()[conf.key or "Authorization"]
+
+    if not auth_header then
+        ngx.log(ngx.ERR, "[", plugin_name, "] Missing Authorization header")
+        return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    local _, token = string.match(auth_header, "^(Bearer)%s+(.+)$")
+    if not token then
+        ngx.log(ngx.ERR, "[", plugin_name, "] Invalid Authorization header format")
+        return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    -- Decode JWT (without verification)
+    local jwt_obj, err = jwt:load_jwt(token)
+    if not jwt_obj then
+        ngx.log(ngx.ERR, "[", plugin_name, "] Failed to load JWT: ", err)
+        return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    if not jwt_obj.valid then
+        ngx.log(ngx.ERR, "[", plugin_name, "] Invalid JWT token: ", jwt_obj.reason)
+        return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    -- Extract fedsso_tkn
+    local fedsso_tkn = jwt_obj.payload.fedsso_tkn
+    if not fedsso_tkn then
+        ngx.log(ngx.ERR, "[", plugin_name, "] fedsso_tkn not found in payload: ",
+            cjson.encode(jwt_obj.payload))
+        return ngx.exit(ngx.HTTP_UNAUTHORIZED)
+    end
+
+    ngx.log(ngx.INFO, "[", plugin_name, "] fedsso_tkn extracted successfully")
+
+    -- Set the new header
+    ngx.req.set_header("Authorization", "Bearer " .. fedsso_tkn)
+
+    ngx.log(ngx.INFO, "[", plugin_name, "] Upstream Authorization header updated")
+
+    return
+end
+
+return _M
