@@ -52,3 +52,34 @@ if conf.ssl then
     broker_config.ssl_key      = conf.ssl_key
     broker_config.ssl_protocol = conf.ssl_protocol
 end
+
+=======================
+
+{
+  "uri": "/test-kafka-logger",
+  "methods": ["GET"],
+  "plugins": {
+    "kafka-logger": {
+      "brokers": [
+        { "host": "kafka1.mycorp.com", "port": 9093 }
+      ],
+      "kafka_topic": "apisix-logs",
+      "producer_type": "async",
+      "required_acks": 1,
+      "timeout": 2000,
+      "producer_batch_num": 10,
+      "producer_batch_size": 1048576,
+      "meta_refresh_interval": 30,
+      "ssl": true,
+      "ssl_verify": true,
+      "ssl_cafile": "/etc/pki/tls/certs/ca-bundle.crt"
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "127.0.0.1:80": 1
+    }
+  }
+}
+
