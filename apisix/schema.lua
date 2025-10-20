@@ -41,3 +41,14 @@ local schema = {
     },
     additionalProperties = false
 }
+
+
+-- Add SSL/TLS options if enabled (flattened for resty.kafka compatibility)
+if conf.ssl then
+    broker_config.ssl = true
+    broker_config.ssl_verify   = conf.ssl_verify
+    broker_config.ssl_cafile   = conf.ssl_cafile
+    broker_config.ssl_cert     = conf.ssl_cert
+    broker_config.ssl_key      = conf.ssl_key
+    broker_config.ssl_protocol = conf.ssl_protocol
+end
