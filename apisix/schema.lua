@@ -56,19 +56,25 @@ end
 =======================
 
 -- --------------------------------------------------------------------------
--- Safe batch processor initialization
+-- Reliable batch processor initialization (APISIX 3.x compatible)
 -- --------------------------------------------------------------------------
-local ok, err = pcall(function()
-    if bp_manager.add_entry and bp_manager:add_entry(conf, entry) then
-        return true
-    end
-end)
 
-if not ok then
-    core.log.warn("kafka-logger: batch processor not ready, creating a new one: ", err or "")
+-- Try to get an existing batch processor context
+local entry_added
+if bp_manager.add_entry then
+    local ok, err = pcall(function()
+        entry_added = bp_manager:add_entry(conf, entry)
+    end)
+    if not ok then
+        core.log.warn("kafka-logger: batch processor not ready (", err, "), will create new")
+    end
 end
 
--- Build broker list and config (same logic as before)
+if entry_added then
+    return
+end
+
+-- Build broker list
 local broker_list = core.table.clone(conf.brokers or {})
 if conf.broker_list then
     for _, host_port in pairs(conf.broker_list) do
@@ -76,6 +82,7 @@ if conf.broker_list then
     end
 end
 
+-- Kafka producer configuration
 local broker_config = {
     request_timeout  = conf.timeout or 1000,
     producer_type    = conf.producer_type,
@@ -96,15 +103,15 @@ if conf.ssl then
     broker_config.ssl_protocol = conf.ssl_protocol
 end
 
--- Create producer
+-- Create or reuse Kafka producer
 local prod, err = lrucache.plugin_ctx(lrucache, ctx, nil,
     create_producer, broker_list, broker_config, conf.cluster_name)
-if err then
+if not prod then
     core.log.error("failed to create kafka producer: ", err)
     return
 end
 
--- Function to actually send entries
+-- Function that sends data to Kafka
 local func = function(entries, batch_max_size)
     local data, jerr
     if batch_max_size == 1 then
@@ -121,6 +128,9 @@ local func = function(entries, batch_max_size)
     return send_kafka_data(conf, ctx, prod, data)
 end
 
--- Now always ensure a processor exists before adding
-bp_manager:add_entry_to_new_processor(conf, entry, ctx, func)
+-- Now create a fresh processor before adding entries
+local ok, err = bp_manager:add_entry_to_new_processor(conf, entry, ctx, func)
+if not ok then
+    core.log.error("kafka-logger: failed to create batch processor: ", err)
+end
 
