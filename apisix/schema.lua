@@ -55,31 +55,72 @@ end
 
 =======================
 
-{
-  "uri": "/test-kafka-logger",
-  "methods": ["GET"],
-  "plugins": {
-    "kafka-logger": {
-      "brokers": [
-        { "host": "kafka1.mycorp.com", "port": 9093 }
-      ],
-      "kafka_topic": "apisix-logs",
-      "producer_type": "async",
-      "required_acks": 1,
-      "timeout": 2000,
-      "producer_batch_num": 10,
-      "producer_batch_size": 1048576,
-      "meta_refresh_interval": 30,
-      "ssl": true,
-      "ssl_verify": true,
-      "ssl_cafile": "/etc/pki/tls/certs/ca-bundle.crt"
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "nodes": {
-      "127.0.0.1:80": 1
-    }
-  }
+-- --------------------------------------------------------------------------
+-- Safe batch processor initialization
+-- --------------------------------------------------------------------------
+local ok, err = pcall(function()
+    if bp_manager.add_entry and bp_manager:add_entry(conf, entry) then
+        return true
+    end
+end)
+
+if not ok then
+    core.log.warn("kafka-logger: batch processor not ready, creating a new one: ", err or "")
+end
+
+-- Build broker list and config (same logic as before)
+local broker_list = core.table.clone(conf.brokers or {})
+if conf.broker_list then
+    for _, host_port in pairs(conf.broker_list) do
+        table.insert(broker_list, { host = host_port.host, port = host_port.port })
+    end
+end
+
+local broker_config = {
+    request_timeout  = conf.timeout or 1000,
+    producer_type    = conf.producer_type,
+    required_acks    = conf.required_acks,
+    batch_num        = conf.producer_batch_num,
+    batch_size       = conf.producer_batch_size,
+    max_buffering    = conf.producer_max_buffering,
+    flush_time       = (conf.producer_time_linger or -1) * 1000,
+    refresh_interval = (conf.meta_refresh_interval or 30) * 1000,
 }
+
+if conf.ssl then
+    broker_config.ssl = true
+    broker_config.ssl_verify   = conf.ssl_verify
+    broker_config.ssl_cafile   = conf.ssl_cafile
+    broker_config.ssl_cert     = conf.ssl_cert
+    broker_config.ssl_key      = conf.ssl_key
+    broker_config.ssl_protocol = conf.ssl_protocol
+end
+
+-- Create producer
+local prod, err = lrucache.plugin_ctx(lrucache, ctx, nil,
+    create_producer, broker_list, broker_config, conf.cluster_name)
+if err then
+    core.log.error("failed to create kafka producer: ", err)
+    return
+end
+
+-- Function to actually send entries
+local func = function(entries, batch_max_size)
+    local data, jerr
+    if batch_max_size == 1 then
+        data = entries[1]
+        if type(data) ~= "string" then
+            data, jerr = core.json.encode(data)
+        end
+    else
+        data, jerr = core.json.encode(entries)
+    end
+    if not data then
+        return false, "error encoding data: " .. (jerr or "unknown")
+    end
+    return send_kafka_data(conf, ctx, prod, data)
+end
+
+-- Now always ensure a processor exists before adding
+bp_manager:add_entry_to_new_processor(conf, entry, ctx, func)
 
