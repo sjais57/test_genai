@@ -1,0 +1,78 @@
+########################################
+# OPA Policy: GES Namespace Access
+# Author: Sumit
+# Description: Grants access to users based on
+# roles and groups defined in GES namespaces.
+########################################
+
+package ges.access
+
+# ----------------------------
+# Default decision
+# ----------------------------
+default allow = false
+default reason = "Access denied"
+
+# ----------------------------
+# Input structure expected:
+# {
+#   "namespace": "namespace1",
+#   "user": "sumit",
+#   "roles": ["aml", "dfs.admin"],
+#   "groups": ["bms", "asd"],
+#   "action": "read",
+#   "resource": "transaction_data"
+# }
+# ----------------------------
+
+# Define namespace-specific roles and groups
+valid_roles = {
+    "namespace1": ["aml", "aml.admin", "dfs", "dfs.admin"],
+    "namespace2": ["fin", "fin.admin", "ops"],
+}
+
+valid_groups = {
+    "namespace1": ["bms", "qwe", "asd"],
+    "namespace2": ["xyz", "pqr"],
+}
+
+# ----------------------------
+# Helper rules
+# ----------------------------
+
+# Check if user's role belongs to allowed roles for given namespace
+has_valid_role {
+    ns := input.namespace
+    role := input.roles[_]
+    role == valid_roles[ns][_]
+}
+
+# Check if user's group belongs to allowed groups for given namespace
+has_valid_group {
+    ns := input.namespace
+    grp := input.groups[_]
+    grp == valid_groups[ns][_]
+}
+
+# ----------------------------
+# Access Rules
+# ----------------------------
+
+# Case 1: User has a valid role and is allowed full access
+allow {
+    has_valid_role
+    input.action in ["read", "write", "delete"]
+}
+
+# Case 2: User has a valid group and is allowed limited actions
+allow {
+    has_valid_group
+    input.action in ["read", "download"]
+}
+
+# ----------------------------
+# Optional: Deny reason message
+# ----------------------------
+reason := "User does not belong to any valid role or group" {
+    not allow
+}
