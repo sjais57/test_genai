@@ -1,0 +1,39 @@
+curl http://127.0.0.1:9180/apisix/admin/routes/2 -H 'X-API-KEY: your-admin-key' -X PUT -d '
+{
+  "uri": "/debug/jwe",
+  "plugins": {
+    "jwe-decrypt": {
+      "key": "test-key-256bit",
+      "algorithm": "dir",
+      "encryption": "A256GCM",
+      "token_in_place": "header",
+      "token_name": "Authorization",
+      "remove_token": false
+    },
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function(conf, ctx)
+          local core = require('"'"'apisix.core'"'"')
+          local token = ctx.var.http_authorization
+          
+          -- Log decryption status
+          core.log.warn('"'"'JWE Token: '"'"', token)
+          core.log.warn('"'"'JWE Decryption attempted'"'"')
+          
+          -- Check if we have decrypted data in headers
+          local headers = ngx.req.get_headers()
+          for k,v in pairs(headers) do
+            core.log.warn('"'"'Header: '"'"', k, '"'"' = '"'"', v)
+          end
+        end"
+      ]
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "httpbin.org": 1
+    }
+  }
+}'
