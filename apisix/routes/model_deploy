@@ -1,0 +1,86 @@
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
+-H 'X-API-KEY: api-key' \
+-H 'Content-Type: application/json' \
+-d '{
+  "uri": "/model-deploy",
+  "methods": ["POST"],
+  "plugins": {
+    "jwt-auth": {},
+    "rewrite-headers": {
+      "add": {
+        "X-Username": "$jwt_claim_sub",
+        "X-FedSSO-Token": "$jwt_claim_fedsso_token"
+      }
+    },
+    "proxy-rewrite": {
+      "uri": "/api/slurm/job"
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream:443": 1
+    }
+  }
+}'
+
+
+=====================
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
+-H 'X-API-KEY: api-key' \
+-H 'Content-Type: application/json' \
+-d '{
+  "uri": "/model-deploy",
+  "methods": ["POST"],
+  "plugins": {
+    "jwt-auth": {},
+    "proxy-rewrite": {
+      "uri": "/api/slurm/job",
+      "headers": {
+        "X-Username": "$jwt_claim_username",
+        "X-FedSSO-Token": "$jwt_claim_fedsso_token"
+      }
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream:443": 1
+    }
+  }
+}'
+
+
+===================
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
+-H 'X-API-KEY: api-key' \
+-H 'Content-Type: application/json' \
+-d '{
+  "uri": "/model-deploy",
+  "plugins": {
+    "jwt-auth": {},
+    "request-transformer": {
+      "add": {
+        "headers": [
+          "X-Username: $jwt_claim_username",
+          "Authorization: Bearer $jwt_claim_fedsso_token"
+        ]
+      }
+    },
+    "proxy-rewrite": {
+      "uri": "/api/slurm/job"
+    }
+  },
+  "methods": ["POST"],
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream:443": 1
+    }
+  }
+}'
