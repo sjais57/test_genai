@@ -1,0 +1,44 @@
+{
+  "ai-prompt-template": {
+    "templates": [
+      {
+        "name": "converter",
+        "template": {
+          "text_input": "You are an expert SAS to Python code converter. Convert the following SAS code to equivalent Python code using pandas, numpy, and other standard libraries. Maintain the same logic and output format. Provide only the Python code without any explanations or markdown formatting.\n\nSAS Code to convert:\n{{user_input}}",
+          "parameters": {
+            "temperature": 0.3,
+            "max_tokens": 2000,
+            "top_p": 0.9,
+            "stop": ["```"]
+          }
+        }
+      }
+    ],
+    "_meta": {
+      "priority": 2520
+    }
+  }
+}
+
+
+=========
+
+"template": {
+  "model": "triton-inference",
+  "endpoint": "${environments.${environment}.urls.triton_inference_url}/v2/models/llama-3.1-70b-versatile/infer",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer {{aihpc_auth_tkn}}"
+  },
+  "body": {
+    "text_input": "{{user_input}}",
+    "parameters": {
+      "temperature": 0.2
+    }
+  },
+  "response_mapping": {
+    "output_field": "outputs[0].data[0]",
+    "type": "text"
+  }
+}
