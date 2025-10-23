@@ -1,32 +1,11 @@
-"serverless-pre-function": {
-  "phase": "access",
-  "functions": [
-    "return function(conf, ctx)\n
-      local jwt = require('resty.jwt')\n
-      local core = require('apisix.core')\n
-      \n      local auth_header = ngx.var.http_authorization\n
-      if not auth_header then\n
-        core.log.warn('No Authorization header found')\n
-        return\n
-      end\n
-      \n      local token = auth_header:match('Bearer%s+(.+)')\n
-      if not token then\n
-        core.log.warn('No Bearer token found in Authorization header')\n
-        return\n
-      end\n
-      \n      local decoded = jwt:load_jwt(token)\n
-      if not decoded.valid then\n
-        core.log.warn('Invalid JWT token')\n
-        return\n
-      end\n
-      \n      local claims = decoded.payload or {}\n
-      local aihpc_auth_tkn = claims.aihpc_auth_tkn\n
-      \n      if aihpc_auth_tkn then\n
-        core.log.info('Extracted aihpc_auth_tkn from JWT, setting upstream Authorization header')\n
-        core.request.set_header(ctx, 'Authorization', 'Bearer ' .. aihpc_auth_tkn)\n
-      else\n
-        core.log.warn('aihpc_auth_tkn not found in JWT payload')\n
-      end\n
-    end"
-  ]
-}
+{
+                    "name": "converter",
+                    "template": {
+                      "text_input": "You are an expert SAS to Python code converter. Convert the following SAS code to equivalent Python code using pandas, numpy, and other standard libraries. Maintain the same logic and output format.\n\nSAS Code to convert:\n{{user_input}}",
+                      "parameters": {
+                        "temperature": 0.3,
+                        "max_tokens": 2000
+                      }
+                    }
+                  }
+                ],
