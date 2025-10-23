@@ -1,44 +1,58 @@
 {
-  "ai-prompt-template": {
-    "templates": [
-      {
-        "name": "converter",
-        "template": {
-          "text_input": "You are an expert SAS to Python code converter. Convert the following SAS code to equivalent Python code using pandas, numpy, and other standard libraries. Maintain the same logic and output format. Provide only the Python code without any explanations or markdown formatting.\n\nSAS Code to convert:\n{{user_input}}",
-          "parameters": {
-            "temperature": 0.3,
-            "max_tokens": 2000,
-            "top_p": 0.9,
-            "stop": ["```"]
+  "name": "convert",
+  "uri": "/sas2py/convert",
+  "methods": ["POST"],
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "${environments.${environment}.urls.groq_base_url}": 1
+    },
+    "timeout": {
+      "connect": 60,
+      "send": 60,
+      "read": 60
+    }
+  },
+  "plugins": {
+    "jwt-auth": {},
+    "request-id": {
+      "header_name": "X-Request-Id",
+      "include_in_response": true,
+      "algorithm": "uuid"
+    },
+    "prometheus": {
+      "prefer_name": true
+    },
+    "ai-prompt-template": {
+      "templates": [
+        {
+          "name": "converter",
+          "template": {
+            "model": "llama-3.1-8b-instant",
+            "input": {
+              "text_input": "{{user_input}}",
+              "parameters": {
+                "temperature": 0.2,
+                "max_tokens": 2000
+              }
+            }
           }
         }
+      ],
+      "_meta": { "priority": 2520 }
+    },
+    "proxy-rewrite": {
+      "uri": "/v2/models/llama-3.1-8b-instant/infer",
+      "host": "triton-server.local",
+      "headers": {
+        "Authorization": "Bearer ${environments.common.secrets.groq_api_key}",
+        "Content-Type": "application/json"
       }
-    ],
-    "_meta": {
-      "priority": 2520
+    },
+    "response-rewrite": {
+      "headers": {
+        "remove": ["Content-Encoding"]
+      }
     }
-  }
-}
-
-
-=========
-
-"template": {
-  "model": "triton-inference",
-  "endpoint": "${environments.${environment}.urls.triton_inference_url}/v2/models/llama-3.1-70b-versatile/infer",
-  "method": "POST",
-  "headers": {
-    "Content-Type": "application/json",
-    "Authorization": "Bearer {{aihpc_auth_tkn}}"
-  },
-  "body": {
-    "text_input": "{{user_input}}",
-    "parameters": {
-      "temperature": 0.2
-    }
-  },
-  "response_mapping": {
-    "output_field": "outputs[0].data[0]",
-    "type": "text"
   }
 }
