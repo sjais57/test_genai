@@ -3,18 +3,47 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
 -H 'Content-Type: application/json' \
 -d '{
   "uri": "/model-deploy",
+  "methods": ["POST"],
   "plugins": {
     "jwt-auth": {},
     "serverless-pre-function": {
       "phase": "access",
       "functions": [
         "return function(conf, ctx)
-          local jwt = ctx.authenticated_jwt_token
-          if jwt then
-            local username = jwt.username
-            local token = jwt.fedsso_token
-            if username then ngx.req.set_header(\"X-Username\", username) end
-            if token then ngx.req.set_header(\"Authorization\", \"Bearer \" .. token) end
+          local jwt = ngx.req.get_headers()[\"Authorization\"]
+          if jwt and jwt:find(\"Bearer \") == 1 then
+            local token = jwt:sub(8)
+            local parts = {}
+            for part in string.gmatch(token, \"[^.]+\") do
+              table.insert(parts, part)
+            end
+            if #parts == 3 then
+              local b64_payload = parts[2]
+              -- normalize base64 (replace URL-safe chars)
+              b64_payload = b64_payload:gsub(\"-\", \"+\"):gsub(\"_\", \"/\")
+              local pad = #b64_payload % 4
+              if pad > 0 then
+                b64_payload = b64_payload .. string.rep(\"=\", 4 - pad)
+              end
+              local decoded_payload = ngx.decode_base64(b64_payload)
+              if decoded_payload then
+                local cjson = require \"cjson.safe\"
+                local payload = cjson.decode(decoded_payload)
+                if payload and payload.aihpc_auth_tkn then
+                  local new_auth = \"Bearer \" .. payload.aihpc_auth_tkn
+                  ngx.req.set_header(\"Authorization\", new_auth)
+                  ngx.log(ngx.INFO, \"[AIHPC] Set Authorization header from JWT aihpc_auth_tkn\")
+                else
+                  ngx.log(ngx.WARN, \"[AIHPC] aihpc_auth_tkn not found in JWT payload\")
+                end
+              else
+                ngx.log(ngx.ERR, \"[AIHPC] Failed to decode JWT payload\")
+              end
+            else
+              ngx.log(ngx.WARN, \"[AIHPC] Invalid JWT structure\")
+            end
+          else
+            ngx.log(ngx.WARN, \"[AIHPC] No Authorization Bearer token found\")
           end
         end"
       ]
@@ -22,6 +51,84 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
     "proxy-rewrite": {
       "uri": "/api/slurm/job",
       "headers": {
+        "Host": "upstream"
+      }
+    }
+  },
+  "upstream": {
+    "type": "roundrobin",
+    "scheme": "https",
+    "nodes": {
+      "upstream:443": 1
+    }
+  }
+}'
+
+=============
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
+-H 'X-API-KEY: api-key' \
+-H 'Content-Type: application/json' \
+-d '{
+  "uri": "/model-deploy",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "rewrite",
+      "functions": [
+        "local function extract_aihpc_token(conf, ctx)
+          local auth_header = ctx.var.http_authorization
+          if auth_header then
+            local jwt_token = string.match(auth_header, 'Bearer%s+(.+)')
+            if jwt_token then
+              -- Decode JWT token (header.payload.signature)
+              local parts = {}
+              for part in string.gmatch(jwt_token, '[^.]+') do
+                table.insert(parts, part)
+              end
+              
+              if #parts >= 2 then
+                -- Base64 decode the payload
+                local payload = parts[2]
+                -- Add padding if needed
+                local padding = 4 - (string.len(payload) % 4)
+                if padding > 0 and padding < 4 then
+                  payload = payload .. string.rep('=', padding)
+                end
+                
+                local ok, decoded = pcall(ngx.decode_base64, payload)
+                if ok and decoded then
+                  local json_ok, json_data = pcall(cjson.decode, decoded)
+                  if json_ok and json_data then
+                    -- Extract aihpc_auth_tkn from JWT payload
+                    local aihpc_token = json_data.aihpc_auth_tkn
+                    if aihpc_token then
+                      -- Set the token in header for upstream
+                      ctx.var.upstream_authorization = 'Bearer ' .. aihpc_token
+                    else
+                      ngx.log(ngx.WARN, 'aihpc_auth_tkn not found in JWT payload')
+                    end
+                  else
+                    ngx.log(ngx.ERR, 'Failed to parse JWT payload as JSON')
+                  end
+                else
+                  ngx.log(ngx.ERR, 'Failed to decode JWT payload')
+                end
+              end
+            else
+              ngx.log(ngx.WARN, 'No Bearer token found in Authorization header')
+            end
+          else
+            ngx.log(ngx.WARN, 'No Authorization header found')
+          end
+        end
+        return extract_aihpc_token"
+      ]
+    },
+    "proxy-rewrite": {
+      "uri": "/api/slurm/job",
+      "headers": {
+        "Authorization": "$upstream_authorization",
         "Host": "upstream"
       }
     }
