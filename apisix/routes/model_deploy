@@ -6,25 +6,28 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
   "plugins": {
     "jwt-auth": {},
     "serverless-pre-function": {
-      "phase": "rewrite",
-      "functions": ["return function(conf, ctx)
-        local jwt = string.match(ctx.var.http_authorization or '', 'Bearer%s+(.+)')
-        if jwt then
-          local payload = string.match(jwt, '^[^.]+.([^.]+)')
-          if payload then
-            payload = payload .. string.rep('=', (4 - #payload % 4) % 4)
-            local ok, data = pcall(cjson.decode, ngx.decode_base64(payload))
-            if ok and data.aihpc_auth_tkn then
-              ctx.var.upstream_auth = 'Bearer ' .. data.aihpc_auth_tkn
-            end
-          end
-        end
-      end"]
+      "phase": "access",
+      "functions": [
+        "return function(conf, ctx)\n
+          local cjson = require('cjson.safe')\n
+          local jwt = require('resty.jwt')\n
+          local auth_header = ngx.var.http_authorization\n
+          if not auth_header then return end\n
+          local token = auth_header:match('Bearer%s+(.+)')\n
+          if not token then return end\n
+          local decoded = jwt:load_jwt(token)\n
+          local claims = decoded.payload or {}\n
+          local aihpc_token = claims.aihpc_auth_tkn\n
+          if aihpc_token then\n
+            ngx.ctx.upstream_auth_header = 'Bearer ' .. aihpc_token\n
+          end\n
+        end"
+      ]
     },
     "proxy-rewrite": {
-      "uri": "/api/slurm/job", 
+      "uri": "/api/slurm/job",
       "headers": {
-        "Authorization": "$upstream_auth",
+        "Authorization": "$upstream_auth_header",
         "Host": "upstream"
       }
     }
@@ -38,3 +41,83 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
     }
   }
 }'
+
+=============
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
+-H 'X-API-KEY: api-key' \
+-H 'Content-Type: application/json' \
+-d '{
+  "uri": "/model-deploy",
+  "plugins": {
+    "jwt-auth": {},
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function(conf, ctx)\n
+          local cjson = require('cjson.safe')\n
+          local jwt = require('resty.jwt')\n
+          local auth_header = ctx.var.http_authorization\n
+          if not auth_header then return end\n
+          local token = auth_header:match('Bearer%s+(.+)')\n
+          if not token then return end\n
+          local decoded = jwt:load_jwt(token)\n
+          local claims = decoded.payload or {}\n
+          local aihpc_token = claims.aihpc_auth_tkn\n
+          if aihpc_token then\n
+            ctx.var.upstream_auth_header = 'Bearer ' .. aihpc_token\n
+          end\n
+        end"
+      ]
+    },
+    "proxy-rewrite": {
+      "uri": "/api/slurm/job",
+      "headers": {
+        "Authorization": "$upstream_auth_header",
+        "Host": "upstream"
+      }
+    }
+  },
+  "methods": ["POST"],
+  "upstream": {
+    "type": "roundrobin", 
+    "scheme": "https",
+    "nodes": {
+      "upstream:443": 1
+    }
+  }
+}'
+
+================
+
+"serverless-pre-function": {
+  "phase": "access",
+  "functions": [
+    "return function(conf, ctx)\n
+      local cjson = require('cjson.safe')\n
+      local jwt = require('resty.jwt')\n
+      local auth_header = ngx.var.http_authorization\n
+      if not auth_header then return end\n
+
+      -- Extract token from 'Authorization: Bearer <token>'
+      local token = auth_header:match('Bearer%s+(.+)')\n
+      if not token then return end\n
+
+      -- Decode JWT payload safely
+      local decoded = jwt:load_jwt(token)\n
+      local claims = decoded and decoded.payload or {}\n
+
+      -- Extract aihpc_auth_tkn claim
+      local aihpc_token = claims.aihpc_auth_tkn\n
+      if aihpc_token and aihpc_token ~= '' then\n
+        ngx.req.set_header('Authorization', 'Bearer ' .. aihpc_token)\n
+        ngx.log(ngx.INFO, '[AIHPC] Upstream Authorization set from JWT aihpc_auth_tkn')\n
+      else\n
+        ngx.log(ngx.WARN, '[AIHPC] aihpc_auth_tkn not found in JWT payload')\n
+      end\n
+    end"
+  ]
+}
+
+
+
