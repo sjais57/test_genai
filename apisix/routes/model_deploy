@@ -3,76 +3,27 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
 -H 'Content-Type: application/json' \
 -d '{
   "uri": "/model-deploy",
-  "methods": ["POST"],
   "plugins": {
     "jwt-auth": {},
-    "rewrite-headers": {
-      "add": {
-        "X-Username": "$jwt_claim_sub",
-        "X-FedSSO-Token": "$jwt_claim_fedsso_token"
-      }
+    "serverless-pre-function": {
+      "phase": "access",
+      "functions": [
+        "return function(conf, ctx)
+          local jwt = ctx.authenticated_jwt_token
+          if jwt then
+            local username = jwt.username
+            local token = jwt.fedsso_token
+            if username then ngx.req.set_header(\"X-Username\", username) end
+            if token then ngx.req.set_header(\"Authorization\", \"Bearer \" .. token) end
+          end
+        end"
+      ]
     },
-    "proxy-rewrite": {
-      "uri": "/api/slurm/job"
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "scheme": "https",
-    "nodes": {
-      "upstream:443": 1
-    }
-  }
-}'
-
-
-=====================
-
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
--H 'X-API-KEY: api-key' \
--H 'Content-Type: application/json' \
--d '{
-  "uri": "/model-deploy",
-  "methods": ["POST"],
-  "plugins": {
-    "jwt-auth": {},
     "proxy-rewrite": {
       "uri": "/api/slurm/job",
       "headers": {
-        "X-Username": "$jwt_claim_username",
-        "X-FedSSO-Token": "$jwt_claim_fedsso_token"
+        "Host": "upstream"
       }
-    }
-  },
-  "upstream": {
-    "type": "roundrobin",
-    "scheme": "https",
-    "nodes": {
-      "upstream:443": 1
-    }
-  }
-}'
-
-
-===================
-
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/model-deployment \
--H 'X-API-KEY: api-key' \
--H 'Content-Type: application/json' \
--d '{
-  "uri": "/model-deploy",
-  "plugins": {
-    "jwt-auth": {},
-    "request-transformer": {
-      "add": {
-        "headers": [
-          "X-Username: $jwt_claim_username",
-          "Authorization: Bearer $jwt_claim_fedsso_token"
-        ]
-      }
-    },
-    "proxy-rewrite": {
-      "uri": "/api/slurm/job"
     }
   },
   "methods": ["POST"],
