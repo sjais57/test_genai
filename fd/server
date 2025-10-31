@@ -1,0 +1,40 @@
+{
+  "name": "serverless-pre-function",
+  "enabled": true,
+  "config": {
+    "phase": "rewrite",
+    "functions": [
+      "return function(conf, ctx)
+        local core = require('apisix.core')
+        local jwt = require('resty.jwt')
+
+        local auth_header = ngx.var.http_authorization
+        if not auth_header then
+          core.log.warn('[Global PreFn] Missing Authorization header')
+          return
+        end
+
+        local encoded_jwt = string.match(auth_header, 'Bearer%s+(.+)')
+        if not encoded_jwt then
+          core.log.warn('[Global PreFn] Bearer token missing')
+          return
+        end
+
+        -- Decode only, don't verify (consumer key not known yet)
+        local jwt_obj = jwt:load_jwt(encoded_jwt)
+        if not (jwt_obj and jwt_obj.valid) then
+          core.log.warn('[Global PreFn] Invalid JWT structure')
+          return
+        end
+
+        local upstream_token = jwt_obj.payload['ahpc_auth_token']
+        if upstream_token then
+          ngx.req.set_header('Authorization', 'Bearer ' .. upstream_token)
+          core.log.info('[Global PreFn] Set new Authorization header from ahpc_auth_token claim')
+        else
+          core.log.warn('[Global PreFn] ahpc_auth_token claim missing in JWT payload')
+        end
+      end"
+    ]
+  }
+}
