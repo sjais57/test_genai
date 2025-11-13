@@ -52,14 +52,31 @@ has_content() {
     fi
 }
 
+# Function to generate unique filename to prevent overwrites
+generate_unique_hdfs_filename() {
+    local base_ts="$1"
+    local counter=0
+    local hdfs_file="${HDFS_BASE_DIR}/combined_${base_ts}.log"
+    
+    # Check if file already exists, if yes, add counter
+    while $HDFS_BIN dfs -test -e "$hdfs_file" 2>/dev/null; do
+        counter=$((counter + 1))
+        hdfs_file="${HDFS_BASE_DIR}/combined_${base_ts}_${counter}.log"
+    done
+    
+    echo "$hdfs_file"
+}
+
 # Function to combine all log files into one
 combine_and_process_logs() {
-    # Generate timestamp for this cycle
-    local ts=$(date -u +%Y%m%dT%H%M%SZ)
-    local combined_snap="/tmp/combined_log_${ts}.log"
-    local hdfs_tmp="${HDFS_BASE_DIR}/.combined_${ts}.log.tmp"
-    local hdfs_file="${HDFS_BASE_DIR}/combined_${ts}.log"
+    # Generate base timestamp for this cycle
+    local base_ts=$(date -u +%Y%m%dT%H%M%SZ)
     
+    # Generate unique HDFS filename to prevent overwrites
+    local hdfs_file=$(generate_unique_hdfs_filename "$base_ts")
+    local hdfs_tmp="${hdfs_file}.tmp"
+    
+    local combined_snap="/tmp/combined_log_${base_ts}.log"
     local has_content_flag=0
     local total_size=0
     
@@ -105,7 +122,8 @@ combine_and_process_logs() {
         # Upload combined file to HDFS
         echo "[$(date -Is)] Combined total: ${total_size} bytes from ${#current_log_files[@]} files"
         
-        if $HDFS_BIN dfs -put -f "$combined_snap" "$hdfs_tmp" && $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file"; then
+        # Use simple put without overwrite protection (it will fail if file exists, but our unique naming prevents this)
+        if $HDFS_BIN dfs -put "$combined_snap" "$hdfs_tmp" && $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file"; then
             $HDFS_BIN dfs -chmod 644 "$hdfs_file" || true
             echo "[$(date -Is)] Shipped combined logs to hdfs://$hdfs_file (${total_size} bytes)"
             rm -f "$combined_snap"
@@ -126,10 +144,9 @@ combine_and_process_logs() {
 create_cycle_marker() {
     local ts=$(date -u +%Y%m%dT%H%M%SZ)
     local marker_file="${HDFS_BASE_DIR}/.cycle_${ts}.marker"
-    local marker_tmp="${HDFS_BASE_DIR}/.cycle_${ts}.marker.tmp"
     
     echo "cycle_completed: $ts, files_processed: $1" > /tmp/cycle_marker.txt
-    if $HDFS_BIN dfs -put -f /tmp/cycle_marker.txt "$marker_tmp" && $HDFS_BIN dfs -mv "$marker_tmp" "$marker_file" 2>/dev/null; then
+    if $HDFS_BIN dfs -put /tmp/cycle_marker.txt "$marker_file" 2>/dev/null; then
         echo "[$(date -Is)] Cycle marker created: hdfs://$marker_file"
         rm -f /tmp/cycle_marker.txt
     else
