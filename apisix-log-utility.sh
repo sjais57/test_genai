@@ -140,21 +140,6 @@ combine_and_process_logs() {
     fi
 }
 
-# Function to create cycle marker
-create_cycle_marker() {
-    local ts=$(date -u +%Y%m%dT%H%M%SZ)
-    local marker_file="${HDFS_BASE_DIR}/.cycle_${ts}.marker"
-    
-    echo "cycle_completed: $ts, files_processed: $1" > /tmp/cycle_marker.txt
-    if $HDFS_BIN dfs -put /tmp/cycle_marker.txt "$marker_file" 2>/dev/null; then
-        echo "[$(date -Is)] Cycle marker created: hdfs://$marker_file"
-        rm -f /tmp/cycle_marker.txt
-    else
-        echo "[$(date -Is)] WARNING: Could not create cycle marker"
-        rm -f /tmp/cycle_marker.txt
-    fi
-}
-
 echo "[$(date -Is)] starting 15-minute combined log copy loop for log files in: $LOG_DIR"
 echo "[$(date -Is)] Configuration: Check every $((BASE_SLEEP/60)) minutes + up to $((JITTER_MAX/60)) minutes jitter"
 
@@ -177,9 +162,6 @@ while true; do
     else
         echo "[$(date -Is)] Combined processing encountered errors"
     fi
-    
-    # Create cycle marker in HDFS
-    create_cycle_marker "${#current_log_files[@]}"
     
     echo "[$(date -Is)] === Cycle completed: ${#current_log_files[@]} files processed ==="
     
