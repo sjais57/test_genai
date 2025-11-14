@@ -1,3 +1,43 @@
+curl "http://127.0.0.1:9180/apisix/admin/routes/1" -H "X-API-KEY: your-admin-key" -X PUT -d '
+{
+  "name": "fastapi-test-route",
+  "uri": "/test/*",
+  "upstream": {
+    "type": "roundrobin",
+    "nodes": {
+      "fqdn1:8000": 1,
+      "fqdn2:8000": 1,
+      "fqdn3:8000": 1
+    },
+    "retries": 3,
+    "timeout": {
+      "connect": 6,
+      "send": 6,
+      "read": 6
+    },
+    "checks": {
+      "active": {
+        "type": "http",
+        "http_path": "/health",
+        "healthy": {
+          "interval": 30,
+          "successes": 1
+        },
+        "unhealthy": {
+          "interval": 30,
+          "http_failures": 3
+        }
+      }
+    }
+  },
+  "plugins": {
+    "proxy-rewrite": {
+      "regex_uri": ["^/test/(.*)", "/$1"]
+    }
+  }
+}'
+
+================
 curl -X PUT http://127.0.0.1:9180/apisix/admin/upstreams/fastapi-upstream \
   -H "X-API-KEY: api-key" \
   -H "Content-Type: application/json" \
