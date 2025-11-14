@@ -42,16 +42,6 @@ discover_log_files() {
     printf '%s\n' "${log_files[@]}"
 }
 
-# Function to check if file has non-empty content (excluding whitespace)
-has_content() {
-    local file="$1"
-    if [ -s "$file" ] && [ -n "$(tr -d '[:space:]' < "$file" 2>/dev/null)" ]; then
-        return 0  # has content
-    else
-        return 1  # empty or only whitespace
-    fi
-}
-
 # Function to generate unique filename to prevent overwrites
 generate_unique_hdfs_filename() {
     local base_ts="$1"
@@ -77,8 +67,8 @@ combine_and_process_logs() {
     local hdfs_tmp="${hdfs_file}.tmp"
     
     local combined_snap="/tmp/combined_log_${base_ts}.log"
-    local has_content_flag=0
     local total_size=0
+    local files_with_content=0
     
     # Wait for flush
     sleep "$FLUSH_WAIT"
@@ -89,54 +79,50 @@ combine_and_process_logs() {
     # Create combined snapshot
     touch "$combined_snap"
     
+    # Add header with cycle information
+    echo "=== CYCLE_START: $(date -Is), LOG_FILES_FOUND: ${#current_log_files[@]} ===" >> "$combined_snap"
+    
     # Process each log file and combine content
     for log_file in "${current_log_files[@]}"; do
-        if [ -r "$log_file" ] && has_content "$log_file"; then
+        if [ -r "$log_file" ]; then
             local size=$(wc -c < "$log_file" 2>/dev/null || echo 0)
             local log_name=$(basename "$log_file")
             
-            # Add separator with log file name and timestamp
-            echo "=== [FILE: $log_name, TIMESTAMP: $(date -Is), SIZE: ${size} bytes] ===" >> "$combined_snap"
+            if [ $size -gt 0 ]; then
+                # File has content
+                echo "=== [FILE: $log_name, SIZE: ${size} bytes] ===" >> "$combined_snap"
+                cat "$log_file" >> "$combined_snap"
+                echo -e "\n" >> "$combined_snap"
+                files_with_content=$((files_with_content + 1))
+            else
+                # File is empty
+                echo "=== [FILE: $log_name, STATUS: EMPTY] ===" >> "$combined_snap"
+            fi
             
-            # Append the actual log content
-            cat "$log_file" >> "$combined_snap"
-            
-            # Add newline separator between files
-            echo -e "\n" >> "$combined_snap"
-            
-            # Truncate the source log file
+            # Always truncate the source log file (whether empty or not)
             : > "$log_file"
-            
             total_size=$((total_size + size))
-            has_content_flag=1
             
-            echo "[$(date -Is)] Added $log_name: ${size} bytes"
+            echo "[$(date -Is)] Processed $log_name: ${size} bytes"
         else
-            echo "[$(date -Is)] $log_file: no content, skipping"
-            # Still truncate empty files to clean any whitespace
-            : > "$log_file" 2>/dev/null || true
+            echo "[$(date -Is)] ERROR: Cannot read log file $log_file"
         fi
     done
     
-    if [ $has_content_flag -eq 1 ]; then
-        # Upload combined file to HDFS
-        echo "[$(date -Is)] Combined total: ${total_size} bytes from ${#current_log_files[@]} files"
-        
-        # Use simple put without overwrite protection (it will fail if file exists, but our unique naming prevents this)
-        if $HDFS_BIN dfs -put "$combined_snap" "$hdfs_tmp" && $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file"; then
-            $HDFS_BIN dfs -chmod 644 "$hdfs_file" || true
-            echo "[$(date -Is)] Shipped combined logs to hdfs://$hdfs_file (${total_size} bytes)"
-            rm -f "$combined_snap"
-            return 0
-        else
-            echo "[$(date -Is)] ERROR: HDFS upload failed for combined logs; snapshot kept at $combined_snap"
-            return 1
-        fi
-    else
-        # No content in any files
-        echo "[$(date -Is)] No content in any log files, skipping HDFS upload"
+    # Add footer with summary
+    echo "=== CYCLE_END: $(date -Is), TOTAL_SIZE: ${total_size} bytes, FILES_WITH_CONTENT: ${files_with_content} ===" >> "$combined_snap"
+    
+    # ALWAYS upload to HDFS, even if empty
+    echo "[$(date -Is)] Uploading to HDFS: ${total_size} bytes from ${files_with_content} files with content"
+    
+    if $HDFS_BIN dfs -put "$combined_snap" "$hdfs_tmp" && $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file"; then
+        $HDFS_BIN dfs -chmod 644 "$hdfs_file" || true
+        echo "[$(date -Is)] SUCCESS: Created hdfs://$hdfs_file (${total_size} bytes)"
         rm -f "$combined_snap"
         return 0
+    else
+        echo "[$(date -Is)] ERROR: HDFS upload failed; snapshot kept at $combined_snap"
+        return 1
     fi
 }
 
@@ -156,14 +142,14 @@ while true; do
         echo "[$(date -Is)] Found ${#current_log_files[@]} log files to combine"
     fi
     
-    # Process all logs combined
+    # Process all logs combined - THIS WILL NOW ALWAYS CREATE HDFS FILE
     if combine_and_process_logs; then
         echo "[$(date -Is)] Combined processing completed successfully"
     else
         echo "[$(date -Is)] Combined processing encountered errors"
     fi
     
-    echo "[$(date -Is)] === Cycle completed: ${#current_log_files[@]} files processed ==="
+    echo "[$(date -Is)] === Cycle completed ==="
     
     # Calculate dynamic sleep to maintain ~15 minute intervals
     cycle_end=$(date +%s)
