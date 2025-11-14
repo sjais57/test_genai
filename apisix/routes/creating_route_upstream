@@ -1,0 +1,43 @@
+curl -X PUT http://127.0.0.1:9180/apisix/admin/upstreams/fastapi-upstream \
+  -H "X-API-KEY: api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "type": "roundrobin",
+        "nodes": {
+            "10.0.0.11:8000": 1,
+            "10.0.0.12:8000": 1,
+            "10.0.0.13:8000": 1
+        },
+        "timeout": {
+            "connect": 3,
+            "send": 3,
+            "read": 6
+        },
+        "retries": 2,
+        "healthcheck": {
+            "active": {
+                "type": "http",
+                "http_path": "/health",
+                "healthy": {
+                    "interval": 2,
+                    "successes": 1
+                },
+                "unhealthy": {
+                    "interval": 1,
+                    "http_failures": 2
+                }
+            }
+        }
+      }'
+
+Route:
+
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/fastapi-route \
+  -H "X-API-KEY: api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "uri": "/api/*",
+        "methods": ["GET", "POST", "PUT", "DELETE"],
+        "upstream_id": "fastapi-upstream"
+      }'
+
