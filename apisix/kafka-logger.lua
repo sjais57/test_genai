@@ -30,6 +30,8 @@ local type  = type
 local req_read_body = ngx.req.read_body
 local plugin_name   = "kafka-logger"
 
+local LOG_PREFIX    = "[kafka-logger][debug] "
+
 -- IMPORTANT: use manager instance, as in upstream 3.12
 local batch_processor_manager = bp_manager_mod.new("kafka logger")
 
@@ -132,7 +134,7 @@ local schema = {
         },
 
         ----------------------------------------------------------------------------
-        -- NEW: SSL options for lua-resty-kafka
+        -- SSL options for lua-resty-kafka
         ----------------------------------------------------------------------------
         ssl = {
             type        = "boolean",
@@ -146,7 +148,7 @@ local schema = {
             description = "Verify Kafka broker certificate (lua-resty-kafka client.ssl_verify)",
         },
 
-        -- These are passed through client.socket_config to your custom broker.lua
+        -- Plugin-level SSL paths (we map them to lua-resty-kafka names)
         ssl_ca_location = {
             type        = "string",
             description = "Path to CA certificate file used to verify broker (optional if broker cert is public / in system trust store)",
@@ -295,8 +297,18 @@ function _M.check_schema(conf, schema_type)
         return core.schema.check(metadata_schema, conf)
     end
 
+    core.log.info(LOG_PREFIX,
+        "check_schema: validating main schema, ssl=",
+        tostring(conf.ssl),
+        ", ssl_verify=", tostring(conf.ssl_verify),
+        ", ssl_ca_location=", tostring(conf.ssl_ca_location),
+        ", ssl_certificate_location=", tostring(conf.ssl_certificate_location),
+        ", ssl_key_location=", tostring(conf.ssl_key_location)
+    )
+
     local ok, err = core.schema.check(schema, conf)
     if not ok then
+        core.log.error(LOG_PREFIX, "check_schema: main schema invalid: ", err)
         return nil, err
     end
 
@@ -305,6 +317,10 @@ function _M.check_schema(conf, schema_type)
         if conf.ssl_ca_location then
             local f = io.open(conf.ssl_ca_location, "r")
             if not f then
+                core.log.error(LOG_PREFIX,
+                    "check_schema: SSL CA file not found: ",
+                    conf.ssl_ca_location
+                )
                 return nil, "SSL CA file not found: " .. conf.ssl_ca_location
             end
             f:close()
@@ -313,7 +329,12 @@ function _M.check_schema(conf, schema_type)
         if conf.ssl_certificate_location then
             local f = io.open(conf.ssl_certificate_location, "r")
             if not f then
-                return nil, "SSL client certificate file not found: " .. conf.ssl_certificate_location
+                core.log.error(LOG_PREFIX,
+                    "check_schema: SSL client certificate file not found: ",
+                    conf.ssl_certificate_location
+                )
+                return nil, "SSL client certificate file not found: "
+                            .. conf.ssl_certificate_location
             end
             f:close()
         end
@@ -321,13 +342,25 @@ function _M.check_schema(conf, schema_type)
         if conf.ssl_key_location then
             local f = io.open(conf.ssl_key_location, "r")
             if not f then
-                return nil, "SSL client key file not found: " .. conf.ssl_key_location
+                core.log.error(LOG_PREFIX,
+                    "check_schema: SSL client key file not found: ",
+                    conf.ssl_key_location
+                )
+                return nil, "SSL client key file not found: "
+                            .. conf.ssl_key_location
             end
             f:close()
         end
     end
 
-    return log_util.check_log_schema(conf)
+    local ok2, err2 = log_util.check_log_schema(conf)
+    if not ok2 then
+        core.log.error(LOG_PREFIX, "check_schema: log schema invalid: ", err2)
+        return nil, err2
+    end
+
+    core.log.info(LOG_PREFIX, "check_schema: schema validation OK")
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -346,7 +379,8 @@ local function get_partition_id(prod, topic, log_message)
             end
         end
 
-        core.log.info("current topic in ringbuffer has no message")
+        core.log.info(LOG_PREFIX,
+            "get_partition_id: current topic in ringbuffer has no message")
         return nil
     end
 
@@ -354,7 +388,8 @@ local function get_partition_id(prod, topic, log_message)
     local sendbuffer = prod.sendbuffer
 
     if not sendbuffer.topics[topic] then
-        core.log.info("current topic in sendbuffer has no message")
+        core.log.info(LOG_PREFIX,
+            "get_partition_id: current topic in sendbuffer has no message")
         return nil
     end
 
@@ -370,7 +405,17 @@ end
 --------------------------------------------------------------------------------
 
 local function create_producer(broker_list, broker_config, cluster_name)
-    core.log.info("create new kafka producer instance")
+    core.log.info(LOG_PREFIX,
+        "create_producer: creating new kafka producer instance, brokers_count=",
+        #broker_list,
+        ", cluster_name=", tostring(cluster_name),
+        ", ssl=", tostring(broker_config.ssl),
+        ", ssl_verify=", tostring(broker_config.ssl_verify),
+        ", ssl_cafile=", tostring(broker_config.ssl_cafile),
+        ", ssl_cert=", tostring(broker_config.ssl_cert),
+        ", ssl_key=", tostring(broker_config.ssl_key)
+    )
+
     return producer:new(broker_list, broker_config, cluster_name)
 end
 
@@ -382,18 +427,29 @@ local function send_kafka_data(conf, log_message, prod)
     local ok, err = prod:send(conf.kafka_topic, conf.key, log_message)
 
     core.log.info(
-        "partition_id: ",
+        LOG_PREFIX,
+        "send_kafka_data: partition_id=",
         core.log.delay_exec(get_partition_id, prod, conf.kafka_topic, log_message)
     )
 
     if not ok then
+        core.log.error(LOG_PREFIX,
+            "send_kafka_data: failed to send to topic=",
+            conf.kafka_topic,
+            ", err=", err or "nil"
+        )
+
         return false,
             "failed to send data to Kafka topic: "
-                .. err
+                .. (err or "unknown")
                 .. ", brokers: "
-                .. core.json.encode(conf.broker_list)
+                .. (conf.broker_list and core.json.encode(conf.broker_list)
+                                     or "nil")
     end
 
+    core.log.info(LOG_PREFIX,
+        "send_kafka_data: successfully sent to topic=",
+        conf.kafka_topic)
     return true
 end
 
@@ -402,6 +458,13 @@ end
 --------------------------------------------------------------------------------
 
 function _M.access(conf, ctx)
+    core.log.info(LOG_PREFIX,
+        "access phase: include_req_body=",
+        tostring(conf.include_req_body),
+        ", include_req_body_expr_set=",
+        tostring(conf.include_req_body_expr ~= nil)
+    )
+
     if conf.include_req_body then
         local should_read_body = true
 
@@ -409,7 +472,8 @@ function _M.access(conf, ctx)
             if not conf.request_expr then
                 local request_expr, err = expr.new(conf.include_req_body_expr)
                 if not request_expr then
-                    core.log.error("generate request expr err ", err)
+                    core.log.error(LOG_PREFIX,
+                        "access: generate request expr err: ", err)
                     return
                 end
 
@@ -417,23 +481,46 @@ function _M.access(conf, ctx)
             end
 
             local result = conf.request_expr:eval(ctx.var)
+            core.log.info(LOG_PREFIX,
+                "access: request_expr eval result=",
+                tostring(result))
             if not result then
                 should_read_body = false
             end
         end
 
         if should_read_body then
+            core.log.info(LOG_PREFIX, "access: calling req_read_body()")
             req_read_body()
+        else
+            core.log.info(LOG_PREFIX,
+                "access: skipping req_read_body() based on expr result")
         end
     end
 end
 
 function _M.body_filter(conf, ctx)
+    core.log.info(LOG_PREFIX,
+        "body_filter: include_resp_body=",
+        tostring(conf.include_resp_body),
+        ", include_resp_body_expr_set=",
+        tostring(conf.include_resp_body_expr ~= nil)
+    )
     log_util.collect_body(conf, ctx)
 end
 
 function _M.log(conf, ctx)
-    -- *** IMPORTANT: use APISIX batch processor correctly ***
+    core.log.info(LOG_PREFIX,
+        "log phase: meta_format=", conf.meta_format,
+        ", kafka_topic=", tostring(conf.kafka_topic),
+        ", producer_type=", tostring(conf.producer_type),
+        ", ssl=", tostring(conf.ssl),
+        ", ssl_verify=", tostring(conf.ssl_verify),
+        ", ssl_ca_location=", tostring(conf.ssl_ca_location),
+        ", ssl_certificate_location=", tostring(conf.ssl_certificate_location),
+        ", ssl_key_location=", tostring(conf.ssl_key_location)
+    )
+
     local metadata = plugin.plugin_metadata(plugin_name)
     local max_pending_entries =
         metadata
@@ -449,13 +536,14 @@ function _M.log(conf, ctx)
     end
 
     if batch_processor_manager:add_entry(conf, entry, max_pending_entries) then
+        core.log.info(LOG_PREFIX,
+            "log: added entry to existing batch processor, returning")
         return
     end
 
     ------------------------------------------------------------------------
     -- Build broker list & broker_config (this is where we inject SSL)
     ------------------------------------------------------------------------
-    -- reuse producer via lrucache to avoid unbalanced partitions of messages in kafka
     local broker_list   = core.table.clone(conf.brokers or {})
     local broker_config = {}
 
@@ -469,23 +557,61 @@ function _M.log(conf, ctx)
         end
     end
 
-    -- lua-resty-kafka expects ms for request_timeout/flush_time/refresh_interval
-    broker_config["request_timeout"]   = conf.timeout * 1000
-    broker_config["producer_type"]     = conf.producer_type
-    broker_config["required_acks"]     = conf.required_acks
-    broker_config["batch_num"]         = conf.producer_batch_num
-    broker_config["batch_size"]        = conf.producer_batch_size
-    broker_config["max_buffering"]     = conf.producer_max_buffering
-    broker_config["flush_time"]        = conf.producer_time_linger * 1000
-    broker_config["refresh_interval"]  = conf.meta_refresh_interval * 1000
+    for i, b in ipairs(broker_list) do
+        core.log.info(LOG_PREFIX,
+            "log: broker[", i, "] host=", tostring(b.host),
+            ", port=", tostring(b.port))
+    end
 
-    -- NEW: SSL options propagated into client.socket_config → broker.lua
-    broker_config["ssl"]                   = conf.ssl or false
-    broker_config["ssl_verify"]            = conf.ssl_verify or false
-    broker_config["ssl_ca_location"]       = conf.ssl_ca_location
-    broker_config["ssl_certificate_location"] = conf.ssl_certificate_location
-    broker_config["ssl_key_location"]      = conf.ssl_key_location
-    broker_config["ssl_key_password"]      = conf.ssl_key_password
+    -- lua-resty-kafka expects ms for request_timeout/flush_time/refresh_interval
+    broker_config.request_timeout  = (conf.timeout or 3) * 1000
+    broker_config.producer_type    = conf.producer_type
+    broker_config.required_acks    = conf.required_acks
+    broker_config.batch_num        = conf.producer_batch_num
+    broker_config.batch_size       = conf.producer_batch_size
+    broker_config.max_buffering    = conf.producer_max_buffering
+    broker_config.flush_time       = (conf.producer_time_linger or 1) * 1000
+    broker_config.refresh_interval = (conf.meta_refresh_interval or 30) * 1000
+
+    -- SSL flags
+    broker_config.ssl        = conf.ssl or false
+    broker_config.ssl_verify = conf.ssl_verify or false
+
+    -- Canonical lua-resty-kafka field names (what client.lua expects)
+    if conf.ssl_ca_location then
+        broker_config.ssl_cafile = conf.ssl_ca_location
+    end
+
+    if conf.ssl_certificate_location then
+        broker_config.ssl_cert = conf.ssl_certificate_location
+    end
+
+    if conf.ssl_key_location then
+        broker_config.ssl_key = conf.ssl_key_location
+    end
+
+    if conf.ssl_key_password then
+        broker_config.ssl_key_password = conf.ssl_key_password
+    end
+
+    -- Also keep *_location for backward compatibility / logging
+    broker_config.ssl_ca_location          = conf.ssl_ca_location
+    broker_config.ssl_certificate_location = conf.ssl_certificate_location
+    broker_config.ssl_key_location         = conf.ssl_key_location
+
+    core.log.info(LOG_PREFIX,
+        "log: broker_config summary: request_timeout=",
+        tostring(broker_config.request_timeout),
+        ", flush_time=", tostring(broker_config.flush_time),
+        ", refresh_interval=", tostring(broker_config.refresh_interval),
+        ", ssl=", tostring(broker_config.ssl),
+        ", ssl_verify=", tostring(broker_config.ssl_verify),
+        ", ssl_cafile=", tostring(broker_config.ssl_cafile),
+        ", ssl_cert=", tostring(broker_config.ssl_cert),
+        ", ssl_key=", tostring(broker_config.ssl_key),
+        ", ssl_key_password_set=",
+        tostring(broker_config.ssl_key_password and true or false)
+    )
 
     local prod, err = core.lrucache.plugin_ctx(
         lrucache, ctx, nil,
@@ -494,15 +620,17 @@ function _M.log(conf, ctx)
     )
 
     core.log.info(
-        "kafka cluster name ",
-        conf.cluster_name,
-        ", broker_list[1] port ",
+        LOG_PREFIX,
+        "log: kafka cluster name=", tostring(conf.cluster_name),
+        ", first broker port=",
         prod and prod.client and prod.client.broker_list
             and prod.client.broker_list[1]
             and prod.client.broker_list[1].port or "nil"
     )
 
     if err then
+        core.log.error(LOG_PREFIX,
+            "log: failed to identify broker: ", err)
         return nil, "failed to identify the broker specified: " .. err
     end
 
@@ -520,16 +648,25 @@ function _M.log(conf, ctx)
         end
 
         if not data then
-            return false, "error occurred while encoding the data: " .. jerr
+            core.log.error(LOG_PREFIX,
+                "batch func: failed to encode data: ", jerr)
+            return false, "error occurred while encoding the data: "
+                          .. (jerr or "unknown")
         end
 
-        core.log.info("send data to kafka: ", data)
+        core.log.info(LOG_PREFIX,
+            "batch func: sending encoded data to kafka, length=",
+            #data)
+
         return send_kafka_data(conf, data, prod)
     end
 
     batch_processor_manager:add_entry_to_new_processor(
         conf, entry, ctx, func, max_pending_entries
     )
+
+    core.log.info(LOG_PREFIX,
+        "log: created new batch processor and added first entry")
 end
 
 return _M
