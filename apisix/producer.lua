@@ -1,222 +1,461 @@
-local client = require("resty.kafka.client")
+-- Copyright (C) Dejiang Zhu (doujiang24)
+
+local response    = require "resty.kafka.response"
+local request     = require "resty.kafka.request"
+local broker      = require "resty.kafka.broker"
+local client      = require "resty.kafka.client"
+local Errors      = require "resty.kafka.errors"
+local sendbuffer  = require "resty.kafka.sendbuffer"
+local ringbuffer  = require "resty.kafka.ringbuffer"
 
 local setmetatable = setmetatable
-local type = type
-local error = error
-local ngx = ngx
-local table = table
-local string = string
-local math = math
+local timer_at     = ngx.timer.at
+local timer_every  = ngx.timer.every
+local is_exiting   = ngx.worker.exiting
+local ngx_sleep    = ngx.sleep
+local ngx_log      = ngx.log
+local ERR          = ngx.ERR
+local INFO         = ngx.INFO
+local DEBUG        = ngx.DEBUG
+local debug        = ngx.config.debug
+local crc32        = ngx.crc32_short
+local pcall        = pcall
+local pairs        = pairs
 
-local _M = { _VERSION = '0.0.2' }
+local API_VERSION_V0 = 0
+local API_VERSION_V1 = 1
+local API_VERSION_V2 = 2
+
+local ok, new_tab = pcall(require, "table.new")
+if not ok then
+    new_tab = function (narr, nrec) return {} end
+end
+
+local _M = { VERSION = "0.20" }
+
 local mt = { __index = _M }
 
--- Modify the new function to accept and store SSL configuration
-local function new(self, broker_list, producer_config, cluster_name)
-    producer_config = producer_config or {}
-    
-    local broker_list = broker_list or {}
-    if #broker_list == 0 then
-        return nil, "broker_list must be specified"
+-- weak value table is useless here, cause _timer_flush always ref p
+-- so, weak value table won't works
+local cluster_inited       = {}
+local DEFAULT_CLUSTER_NAME = 1
+
+
+local function default_partitioner(key, num, correlation_id)
+    local id = key and crc32(key) or correlation_id
+    -- partition_id is continuous and start from 0
+    return id % num
+end
+
+
+local function correlation_id(self)
+    local id = (self.correlation_id + 1) % 1073741824 -- 2^30
+    self.correlation_id = id
+
+    return id
+end
+
+
+local function produce_encode(self, topic_partitions)
+    local req = request:new(request.ProduceRequest,
+                            correlation_id(self),
+                            self.client.client_id,
+                            self.api_version)
+
+    req:int16(self.required_acks)
+    req:int32(self.request_timeout)
+    req:int32(topic_partitions.topic_num)
+
+    for topic, partitions in pairs(topic_partitions.topics) do
+        req:string(topic)
+        req:int32(partitions.partition_num)
+
+        for partition_id, buffer in pairs(partitions.partitions) do
+            req:int32(partition_id)
+
+            -- MessageSetSize and MessageSet
+            req:int32(buffer.size)
+            req:message_set(buffer.queue, buffer.index)
+        end
     end
 
-    -- Extract SSL/TLS configuration
-    local ssl = producer_config.ssl or false
-    local ssl_verify = producer_config.ssl_verify or false
-    local sasl = producer_config.sasl or false
-    local sasl_username = producer_config.sasl_username
-    local sasl_password = producer_config.sasl_password
-    local sasl_mechanism = producer_config.sasl_mechanism or "PLAIN"
-    local ssl_ca_location = producer_config.ssl_ca_location
-    local ssl_certificate_location = producer_config.ssl_certificate_location
-    local ssl_key_location = producer_config.ssl_key_location
-    local ssl_key_password = producer_config.ssl_key_password
-    local ssl_protocol = producer_config.ssl_protocol or "TLSv1.2"
+    return req
+end
 
-    local self = {
-        broker_list = broker_list,
-        producer_config = producer_config,
-        async = producer_config.producer_type ~= "sync",
-        required_acks = producer_config.required_acks or 1,
-        request_timeout = producer_config.request_timeout or 3000,
-        batch_num = producer_config.batch_num or 200,
-        batch_size = producer_config.batch_size or 1048576,
-        max_buffering = producer_config.max_buffering or 50000,
-        flush_time = producer_config.flush_time or -1,
-        refresh_interval = producer_config.refresh_interval or 30000,
-        cluster_name = cluster_name or -1,
 
-        -- SSL/TLS configuration
-        ssl = ssl,
-        ssl_verify = ssl_verify,
-        sasl = sasl,
-        sasl_username = sasl_username,
-        sasl_password = sasl_password,
-        sasl_mechanism = sasl_mechanism,
-        ssl_ca_location = ssl_ca_location,
-        ssl_certificate_location = ssl_certificate_location,
-        ssl_key_location = ssl_key_location,
-        ssl_key_password = ssl_key_password,
-        ssl_protocol = ssl_protocol,
-    }
+local function produce_decode(resp)
+    local topic_num   = resp:int32()
+    local ret         = new_tab(0, topic_num)
+    local api_version = resp.api_version
 
-    -- Initialize Kafka client with SSL configuration
-    self.client = client:new(self.cluster_name)
-    
-    -- Set SSL configuration on the client
-    if self.client.set_ssl_config then
-        self.client:set_ssl_config({
-            ssl = self.ssl,
-            ssl_verify = self.ssl_verify,
-            sasl = self.sasl,
-            sasl_username = self.sasl_username,
-            sasl_password = self.sasl_password,
-            sasl_mechanism = self.sasl_mechanism,
-            ssl_ca_location = self.ssl_ca_location,
-            ssl_certificate_location = self.ssl_certificate_location,
-            ssl_key_location = self.ssl_key_location,
-            ssl_key_password = self.ssl_key_password,
-            ssl_protocol = self.ssl_protocol,
-            request_timeout = self.request_timeout,
-        })
+    for i = 1, topic_num do
+        local topic         = resp:string()
+        local partition_num = resp:int32()
+
+        ret[topic] = {}
+
+        -- ignore ThrottleTime
+        for j = 1, partition_num do
+            local partition = resp:int32()
+
+            if api_version == API_VERSION_V0
+               or api_version == API_VERSION_V1
+            then
+                ret[topic][partition] = {
+                    errcode = resp:int16(),
+                    offset  = resp:int64(),
+                }
+
+            elseif api_version == API_VERSION_V2 then
+                ret[topic][partition] = {
+                    errcode   = resp:int16(),
+                    offset    = resp:int64(),
+                    timestamp = resp:int64(),  -- If CreateTime is used, this field is always -1
+                }
+            end
+        end
     end
 
-    -- Initialize metadata refresh
-    local ok, err = self.client:update_metadata(self.broker_list)
-    if not ok then
+    return ret
+end
+
+
+local function choose_partition(self, topic, key)
+    local brokers, partitions = self.client:fetch_metadata(topic)
+    if not brokers then
+        return nil, partitions
+    end
+
+    return self.partitioner(key, partitions.num, self.correlation_id)
+end
+
+
+local function _flush_lock(self)
+    if not self.flushing then
+        if debug then
+            ngx_log(DEBUG, "flush lock acquired")
+        end
+        self.flushing = true
+        return true
+    end
+
+    return false
+end
+
+
+local function _flush_unlock(self)
+    if debug then
+        ngx_log(DEBUG, "flush lock released")
+    end
+    self.flushing = false
+end
+
+
+local function _send(self, broker_conf, topic_partitions)
+    local sendbuffer = self.sendbuffer
+    local resp, err, retryable = nil, nil, true
+
+    local bk, berr = broker:new(
+        broker_conf.host,
+        broker_conf.port,
+        self.socket_config,
+        broker_conf.sasl_config
+    )
+
+    if bk then
+        local req = produce_encode(self, topic_partitions)
+
+        resp, err, retryable = bk:send_receive(req)
+        if resp then
+            local result = produce_decode(resp)
+
+            for topic, partitions in pairs(result) do
+                for partition_id, r in pairs(partitions) do
+                    local errcode = r.errcode
+
+                    if errcode == 0 then
+                        sendbuffer:offset(topic, partition_id, r.offset)
+                        sendbuffer:clear(topic, partition_id)
+                    else
+                        err = Errors[errcode] or Errors[-1]
+
+                        -- in this older version library: retryable is a boolean from broker
+                        local retryable0 = retryable
+
+                        local index = sendbuffer:err(
+                            topic, partition_id, err.msg, retryable0
+                        )
+
+                        ngx_log(
+                            INFO,
+                            "kafka send err: ", err.msg,
+                            " errcode: ", errcode,
+                            " retryable: ", retryable0,
+                            " topic: ", topic,
+                            " partition_id: ", partition_id,
+                            " index: ", index / 2
+                        )
+                    end
+                end
+            end
+
+            return resp, err, retryable
+        end
+    end
+
+    -- when broker:new failed or send_receive failed, mark error on all partitions
+    for topic, partitions in pairs(topic_partitions.topics) do
+        for partition_id, partition in pairs(partitions.partitions) do
+            sendbuffer:err(topic, partition_id, err or berr, retryable)
+        end
+    end
+
+    return resp, err, retryable
+end
+
+
+local function _batch_send(self, sendbuffer)
+    local try_num = 0
+    while try_num <= self.max_retry do
+        -- aggregator
+        local send_num, sendbroker = sendbuffer:aggregator(self.client)
+        if send_num == 0 then
+            break
+        end
+
+        for i = 1, send_num do
+            local broker_conf, topic_partitions =
+                sendbroker[i], sendbroker[i + send_num]
+
+            _send(self, broker_conf, topic_partitions)
+        end
+
+        if sendbuffer:done() then
+            return true
+        end
+
+        self.client:refresh()
+
+        try_num = try_num + 1
+        if try_num <= self.max_retry then
+            ngx_sleep(self.retry_backoff / 1000)  -- ms to s
+        end
+    end
+
+    return false
+end
+
+
+local flush_buffer
+
+
+local function _flush(premature, self)
+    if not _flush_lock(self) then
+        if debug then
+            ngx_log(DEBUG, "previous flush not finished")
+        end
+        return
+    end
+
+    local ringbuffer = self.ringbuffer
+    local sendbuffer = self.sendbuffer
+    while true do
+        local topic, key, msg = ringbuffer:pop()
+        if not topic then
+            break
+        end
+
+        local partition_id, err = choose_partition(self, topic, key)
+        if not partition_id then
+            partition_id = -1
+        end
+
+        local overflow = sendbuffer:add(topic, partition_id, key, msg)
+        if overflow then        -- reached batch_size in one topic/partition
+            break
+        end
+    end
+
+    local all_done = _batch_send(self, sendbuffer)
+    if not all_done then
+        for topic, partitions in pairs(sendbuffer:loop()) do
+            for partition_id, buffer in pairs(partitions.partitions) do
+                local queue, index, err, retryable =
+                    buffer.queue, buffer.index, buffer.err, buffer.retryable
+
+                if self.error_handle then
+                    local ok, e = pcall(self.error_handle,
+                                        topic, partition_id,
+                                        queue, index, err, retryable)
+                    if not ok then
+                        ngx_log(ERR, "failed to callback error_handle: ", e)
+                    end
+                else
+                    ngx_log(ERR, "buffered messages send to Kafka err: ", err,
+                            ", retryable: ", retryable,
+                            ", topic: ", topic,
+                            ", partition_id: ", partition_id,
+                            ", length: ", index / 2)
+                end
+
+                sendbuffer:clear(topic, partition_id)
+            end
+        end
+    end
+
+    _flush_unlock(self)
+
+    -- reset _timer_flushing_buffer after flushing complete
+    self._timer_flushing_buffer = false
+
+    if ringbuffer:need_send() then
+        flush_buffer(self)
+
+    elseif is_exiting() and ringbuffer:left_num() > 0 then
+        -- still can create 0 timer when exiting
+        flush_buffer(self)
+    end
+
+    return true
+end
+
+
+flush_buffer = function (self)
+    if self._timer_flushing_buffer then
+        if debug then
+            ngx_log(DEBUG, "another timer is flushing buffer, skipping it")
+        end
+
+        return
+    end
+
+    local ok, err = timer_at(0, _flush, self)
+    if ok then
+        self._timer_flushing_buffer = true
+        return
+    end
+
+    ngx_log(ERR, "failed to create timer_at: ", err)
+end
+
+
+local function _timer_flush(premature, self)
+    self._timer_flushing_buffer = false
+    flush_buffer(self)
+end
+
+
+function _M.new(self, broker_list, producer_config, cluster_name)
+    local name = cluster_name or DEFAULT_CLUSTER_NAME
+    local opts = producer_config or {}
+    local async = opts.producer_type == "async"
+    if async and cluster_inited[name] then
+        return cluster_inited[name]
+    end
+
+    -- IMPORTANT: opts carries ssl, ssl_verify, ssl_ca_location, etc.
+    -- client.lua should turn these into cli.socket_config.* which your
+    -- broker.lua then uses for sslhandshake & client certs.
+    local cli = client:new(broker_list, producer_config)
+
+    local p = setmetatable({
+        client                 = cli,
+        correlation_id         = 1,
+        request_timeout        = opts.request_timeout or 2000,
+        retry_backoff          = opts.retry_backoff or 100,  -- ms
+        max_retry              = opts.max_retry or 3,
+        required_acks          = opts.required_acks or 1,
+        partitioner            = opts.partitioner or default_partitioner,
+        error_handle           = opts.error_handle,
+        api_version            = opts.api_version or API_VERSION_V1,
+        async                  = async,
+        socket_config          = cli.socket_config,
+        _timer_flushing_buffer = false,
+        ringbuffer             = ringbuffer:new(
+                                   opts.batch_num or 200,
+                                   opts.max_buffering or 50000,
+                                   opts.wait_on_buffer_full or false,
+                                   opts.wait_buffer_timeout or 5
+                                 ),
+        sendbuffer             = sendbuffer:new(
+                                   opts.batch_num or 200,
+                                   opts.batch_size or 1048576
+                                 ),
+            -- default: 1K, 1M
+            -- batch_size should less than (MaxRequestSize / 2 - 10KB)
+            -- config in the kafka server, default 100M
+    }, mt)
+
+    if async then
+        cluster_inited[name] = p
+        local ok, err = timer_every((opts.flush_time or 1000) / 1000,
+                                    _timer_flush, p)   -- default: 1s
+        if not ok then
+            ngx_log(ERR, "failed to create timer_every: ", err)
+        end
+    end
+
+    return p
+end
+
+
+-- offset is cdata (LL in luajit)
+function _M.send(self, topic, key, message)
+    if self.async then
+        local ringbuffer = self.ringbuffer
+
+        local ok, err = ringbuffer:add(topic, key, message)
+        if not ok then
+            return nil, err
+        end
+
+        if not self.flushing
+           and (ringbuffer:need_send() or is_exiting())
+        then
+            flush_buffer(self)
+        end
+
+        return true
+    end
+
+    local partition_id, err = choose_partition(self, topic, key)
+    if not partition_id then
         return nil, err
     end
 
-    -- Initialize ring buffer for async producer
-    if self.async then
-        self.ringbuffer = {
-            size = self.max_buffering * 3,  -- 3 fields per message: topic, key, message
-            queue = {},
-        }
-        for i = 1, self.ringbuffer.size do
-            self.ringbuffer.queue[i] = nil
-        end
-        self.ringbuffer.read_pos = 1
-        self.ringbuffer.write_pos = 1
-    else
-        -- Initialize send buffer for sync producer
-        self.sendbuffer = {
-            topics = {},
-            size = 0,
-        }
+    local sendbuffer = self.sendbuffer
+    sendbuffer:add(topic, partition_id, key, message)
+
+    local ok = _batch_send(self, sendbuffer)
+    if not ok then
+        sendbuffer:clear(topic, partition_id)
+        return nil, sendbuffer:err(topic, partition_id)
     end
 
-    -- Log SSL configuration
-    if self.ssl then
-        ngx.log(ngx.INFO, "Kafka producer SSL enabled - CA: ", self.ssl_ca_location or "not set",
-                ", Cert: ", self.ssl_certificate_location or "not set",
-                ", Key: ", self.ssl_key_location or "not set")
-    end
-
-    return setmetatable(self, mt)
+    return sendbuffer:offset(topic, partition_id)
 end
 
--- Add a method to update SSL configuration if needed
-function _M.set_ssl_config(self, ssl_config)
-    if not ssl_config then
-        return nil, "SSL configuration is required"
-    end
 
-    self.ssl = ssl_config.ssl or self.ssl
-    self.ssl_verify = ssl_config.ssl_verify or self.ssl_verify
-    self.sasl = ssl_config.sasl or self.sasl
-    self.sasl_username = ssl_config.sasl_username or self.sasl_username
-    self.sasl_password = ssl_config.sasl_password or self.sasl_password
-    self.sasl_mechanism = ssl_config.sasl_mechanism or self.sasl_mechanism
-    self.ssl_ca_location = ssl_config.ssl_ca_location or self.ssl_ca_location
-    self.ssl_certificate_location = ssl_config.ssl_certificate_location or self.ssl_certificate_location
-    self.ssl_key_location = ssl_config.ssl_key_location or self.ssl_key_location
-    self.ssl_key_password = ssl_config.ssl_key_password or self.ssl_key_password
-    self.ssl_protocol = ssl_config.ssl_protocol or self.ssl_protocol
-
-    -- Update client SSL configuration
-    if self.client and self.client.set_ssl_config then
-        return self.client:set_ssl_config({
-            ssl = self.ssl,
-            ssl_verify = self.ssl_verify,
-            sasl = self.sasl,
-            sasl_username = self.sasl_username,
-            sasl_password = self.sasl_password,
-            sasl_mechanism = self.sasl_mechanism,
-            ssl_ca_location = self.ssl_ca_location,
-            ssl_certificate_location = self.ssl_certificate_location,
-            ssl_key_location = self.ssl_key_location,
-            ssl_key_password = self.ssl_key_password,
-            ssl_protocol = self.ssl_protocol,
-            request_timeout = self.request_timeout,
-        })
-    end
-
-    return true
-end
-
--- The rest of the existing producer methods remain the same
--- but they will now use the SSL-enabled client
-
-function _M.send(self, topic, key, message)
-    -- Existing send implementation, but now with SSL support
-    if self.async then
-        return self:async_send(topic, key, message)
-    else
-        return self:sync_send(topic, key, message)
-    end
-end
-
--- Existing async_send function (no changes needed to the logic)
-function _M.async_send(self, topic, key, message)
-    local ringbuffer = self.ringbuffer
-    local read_pos = ringbuffer.read_pos
-    local write_pos = ringbuffer.write_pos
-
-    -- Calculate available space
-    local available
-    if write_pos >= read_pos then
-        available = ringbuffer.size - (write_pos - read_pos)
-    else
-        available = read_pos - write_pos
-    end
-
-    if available < 3 then
-        return nil, "buffer is full"
-    end
-
-    -- Store message in ring buffer
-    ringbuffer.queue[write_pos] = topic
-    ringbuffer.queue[write_pos + 1] = key
-    ringbuffer.queue[write_pos + 2] = message
-
-    -- Update write position
-    ringbuffer.write_pos = write_pos + 3
-    if ringbuffer.write_pos > ringbuffer.size then
-        ringbuffer.write_pos = 1
-    end
-
-    -- Trigger flush if batch size is reached
-    if self.batch_num > 0 and (ringbuffer.write_pos - ringbuffer.read_pos) >= self.batch_num * 3 then
-        self:flush()
-    end
-
-    return true
-end
-
--- Existing sync_send function (no changes needed to the logic)
-function _M.sync_send(self, topic, key, message)
-    -- ... existing sync_send implementation
-    -- This will now automatically use the SSL-enabled client
-end
-
--- Existing flush function (no changes needed to the logic)
 function _M.flush(self)
-    -- ... existing flush implementation
-    -- This will now automatically use the SSL-enabled client
+    return _flush(nil, self)
 end
 
--- Make the new function available
-_M.new = new
+
+-- offset is cdata (LL in luajit)
+function _M.offset(self)
+    local topics = self.sendbuffer.topics
+    local sum, details = 0, {}
+
+    for topic, partitions in pairs(topics) do
+        details[topic] = {}
+        for partition_id, buffer in pairs(partitions) do
+            sum = sum + buffer.offset
+            details[topic][partition_id] = buffer.offset
+        end
+    end
+
+    return sum, details
+end
+
 
 return _M
