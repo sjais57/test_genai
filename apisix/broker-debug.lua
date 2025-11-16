@@ -258,18 +258,22 @@ function M.send_receive(self, req)
         ngx_log(INFO, LOG_PREFIX,
             "send_receive: SSL enabled, preparing client cert (if any)")
 
-        if self.config.ssl_certificate_location and self.config.ssl_key_location then
+        -- Prefer *_location if present, else fallback to stock ssl_cert/ssl_key
+        local cert = self.config.ssl_certificate_location or self.config.ssl_cert
+        local key  = self.config.ssl_key_location       or self.config.ssl_key
+
+        if cert and key then
             ngx_log(INFO, LOG_PREFIX,
                 "send_receive: setting client cert & key BEFORE SSL handshake, cert=",
-                tostring(self.config.ssl_certificate_location),
-                ", key=", tostring(self.config.ssl_key_location),
+                tostring(cert),
+                ", key=", tostring(key),
                 ", key_password_set=",
                 tostring(self.config.ssl_key_password and true or false)
             )
 
             local okc, errc = sock:setclientcert(
-                self.config.ssl_certificate_location,
-                self.config.ssl_key_location,
+                cert,
+                key,
                 self.config.ssl_key_password
             )
             if not okc then
@@ -285,7 +289,12 @@ function M.send_receive(self, req)
         else
             ngx_log(WARN, LOG_PREFIX,
                 "send_receive: no client cert configured in socket_config; " ..
-                "if Kafka requires mTLS, broker may send 'bad certificate'")
+                "if Kafka requires mTLS, broker may send 'bad certificate'. " ..
+                "socket_config.ssl_cert=", tostring(self.config.ssl_cert),
+                ", socket_config.ssl_key=", tostring(self.config.ssl_key),
+                ", socket_config.ssl_certificate_location=", tostring(self.config.ssl_certificate_location),
+                ", socket_config.ssl_key_location=", tostring(self.config.ssl_key_location)
+            )
         end
 
         ngx_log(INFO, LOG_PREFIX,
