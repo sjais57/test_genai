@@ -1,31 +1,45 @@
--- Apache APISIX - kafka-logger plugin (extended for SSL/SASL)
+-- Licensed to the Apache Software Foundation (ASF) under one or more
+-- contributor license agreements.  See the NOTICE file distributed with
+-- this work for additional information regarding copyright ownership.
+-- The ASF licenses this file to You under the Apache License, Version 2.0
+-- (the "License"); you may not use this file except in compliance with
+-- the License.  You may obtain a copy of the License at
 --
--- This version:
---   * Keeps APISIX 3.12 behaviour
---   * Adds top-level SSL/SASL settings on the plugin config
---   * Maps global SASL into per-broker sasl_config if not already present
---   * Passes SSL options down to lua-resty-kafka via producer_config
---   * Compatible with your custom broker.lua (ssl_ca_location, client cert, sasl)
+--     http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-- See the License for the specific language governing permissions and
+-- limitations under the License.
+--
 
-local expr          = require("resty.expr.v1")
-local core          = require("apisix.core")
-local log_util      = require("apisix.utils.log-util")
-local producer      = require("resty.kafka.producer")
-local bp_manager    = require("apisix.utils.batch-processor-manager")
+local expr     = require("resty.expr.v1")
+local core     = require("apisix.core")
+local log_util = require("apisix.utils.log-util")
 
-local math          = math
-local pairs         = pairs
-local type          = type
+local producer = require("resty.kafka.producer")
+
+local bp_manager_mod = require("apisix.utils.batch-processor-manager")
+local plugin         = require("apisix.plugin")
+
+local math  = math
+local pairs = pairs
+local type  = type
+
 local req_read_body = ngx.req.read_body
 local plugin_name   = "kafka-logger"
 
-local LOG_PREFIX    = "[kafka-logger][debug] "
+-- IMPORTANT: use manager instance, as in upstream 3.12
+local batch_processor_manager = bp_manager_mod.new("kafka logger")
 
-local lrucache = core.lrucache.new({ type = "plugin" })
+local lrucache = core.lrucache.new({
+    type = "plugin",
+})
 
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Schema
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 local schema = {
     type = "object",
@@ -36,9 +50,22 @@ local schema = {
             enum = {"default", "origin"},
         },
 
-        log_format  = { type = "object" },
+        log_format = { type = "object" },
 
-        -- Modern APISIX 'brokers' field
+        -- deprecated, use "brokers" instead
+        broker_list = {
+            type = "object",
+            minProperties = 1,
+            patternProperties = {
+                [".*"] = {
+                    description = "the port of kafka broker",
+                    type = "integer",
+                    minimum = 1,
+                    maximum = 65535,
+                },
+            },
+        },
+
         brokers = {
             type = "array",
             minItems = 1,
@@ -51,40 +78,34 @@ local schema = {
                     },
                     port = {
                         type = "integer",
-                        minimum = 1, maximum = 65535,
+                        minimum = 1,
+                        maximum = 65535,
                         description = "the port of kafka broker",
                     },
                     sasl_config = {
                         type = "object",
-                        description = "per-broker SASL config (backward compatible)",
+                        description = "sasl config",
                         properties = {
                             mechanism = {
                                 type = "string",
                                 default = "PLAIN",
                                 enum = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"},
                             },
-                            user = { type = "string" },
-                            password = { type = "string" },
+                            user = {
+                                type = "string",
+                                description = "user",
+                            },
+                            password = {
+                                type = "string",
+                                description = "password",
+                            },
                         },
-                        required = {"user", "password"},
+                        required = { "user", "password" },
                     },
                 },
-                required = {"host", "port"},
+                required = { "host", "port" },
             },
             uniqueItems = true,
-        },
-
-        -- Older APISIX 'broker_list' (still accepted and merged)
-        broker_list = {
-            type = "array",
-            items = {
-                type = "object",
-                properties = {
-                    host = { type = "string" },
-                    port = { type = "integer", minimum = 1, maximum = 65535 },
-                },
-                required = {"host", "port"},
-            }
         },
 
         kafka_topic   = { type = "string" },
@@ -92,137 +113,182 @@ local schema = {
         producer_type = {
             type = "string",
             default = "async",
-            enum = {"async", "sync"},
+            enum = { "async", "sync" },
         },
 
         required_acks = {
             type = "integer",
             default = 1,
-            enum = {-1, 1, 0},
+            enum = { 1, -1 },
         },
 
         key = { type = "string" },
 
+        -- APISIX docs: seconds
         timeout = {
             type = "integer",
             minimum = 1,
-            default = 1000,  -- ms
+            default = 3,
         },
 
-        ------------------------------------------------------------------
-        -- SSL / SASL (global-level, mapped into lua-resty-kafka)
-        ------------------------------------------------------------------
+        ----------------------------------------------------------------------------
+        -- NEW: SSL options for lua-resty-kafka
+        ----------------------------------------------------------------------------
         ssl = {
-            type = "boolean",
-            default = false,
-            description = "Enable SSL/TLS connection to Kafka (passed to lua-resty-kafka client.ssl)",
+            type        = "boolean",
+            default     = false,
+            description = "Enable SSL/TLS for Kafka connection (lua-resty-kafka client.ssl)",
         },
+
         ssl_verify = {
-            type = "boolean",
-            default = false,
-            description = "Verify Kafka broker certificate (client.ssl_verify)",
+            type        = "boolean",
+            default     = false,
+            description = "Verify Kafka broker certificate (lua-resty-kafka client.ssl_verify)",
         },
 
-        -- If you want to control CA / client certs by file path.
-        -- NOTE: openresty normally uses nginx directives for CA;
-        -- here we simply pass these values down and your custom
-        -- client.lua/broker.lua reads them from socket_config.
+        -- These are passed through client.socket_config to your custom broker.lua
         ssl_ca_location = {
-            type = "string",
-            description = "Path to CA certificate file (used by your custom broker.lua/client.lua)",
+            type        = "string",
+            description = "Path to CA certificate file used to verify broker (optional if broker cert is public / in system trust store)",
         },
+
         ssl_certificate_location = {
-            type = "string",
-            description = "Path to client certificate (for mTLS, optional)",
+            type        = "string",
+            description = "Path to client certificate file for mTLS (optional)",
         },
+
         ssl_key_location = {
-            type = "string",
-            description = "Path to client key (for mTLS, optional)",
+            type        = "string",
+            description = "Path to client private key file for mTLS (optional)",
         },
+
         ssl_key_password = {
-            type = "string",
-            description = "Password for client key (if encrypted, optional)",
+            type        = "string",
+            description = "Password for client private key (if encrypted, optional)",
         },
 
-        -- Global SASL (convenience) – will be mapped into per-broker sasl_config
-        sasl = {
-            type = "boolean",
+        ----------------------------------------------------------------------------
+        -- Body capture settings
+        ----------------------------------------------------------------------------
+        include_req_body = {
+            type    = "boolean",
             default = false,
-            description = "Enable SASL auth for all brokers (if per-broker sasl_config missing)",
-        },
-        sasl_username = {
-            type = "string",
-            description = "Global SASL username",
-        },
-        sasl_password = {
-            type = "string",
-            description = "Global SASL password",
-        },
-        sasl_mechanism = {
-            type = "string",
-            enum = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"},
-            default = "PLAIN",
-            description = "Global SASL mechanism",
         },
 
-        ------------------------------------------------------------------
-        -- Body collection options
-        ------------------------------------------------------------------
-        include_req_body = { type = "boolean", default = false },
         include_req_body_expr = {
-            type = "array",
+            type     = "array",
             minItems = 1,
-            items = { type = "array" },
+            items    = {
+                type = "array",
+            },
         },
 
-        include_resp_body = { type = "boolean", default = false },
+        include_resp_body = {
+            type    = "boolean",
+            default = false,
+        },
+
         include_resp_body_expr = {
-            type = "array",
+            type     = "array",
             minItems = 1,
-            items = { type = "array" },
+            items    = {
+                type = "array",
+            },
         },
 
-        max_req_body_bytes  = { type = "integer", minimum = 1, default = 524288 },
-        max_resp_body_bytes = { type = "integer", minimum = 1, default = 524288 },
+        max_req_body_bytes = {
+            type     = "integer",
+            minimum  = 1,
+            default  = 524288,
+        },
 
-        cluster_name = { type = "integer", minimum = -1, default = -1 },
+        max_resp_body_bytes = {
+            type     = "integer",
+            minimum  = 1,
+            default  = 524288,
+        },
 
-        -- These go straight into lua-resty-kafka producer options
-        producer_batch_num     = { type = "integer", minimum = 1, default = 200 },
-        producer_batch_size    = { type = "integer", minimum = 1, default = 1048576 },
-        producer_max_buffering = { type = "integer", minimum = 1, default = 50000 },
+        -- in lua-resty-kafka, cluster_name is defined as number
+        -- see https://github.com/doujiang24/lua-resty-kafka#new-1
+        cluster_name = {
+            type    = "integer",
+            minimum = 1,
+            default = 1,
+        },
 
-        -- Seconds in APISIX; converted to ms for lua-resty-kafka `flush_time`
-        producer_time_linger   = { type = "integer", minimum = 1, default = 1 },
+        -- config for lua-resty-kafka, default value is same as lua-resty-kafka
+        producer_batch_num = {
+            type    = "integer",
+            minimum = 1,
+            default = 200,
+        },
 
-        -- Seconds; passed to lua-resty-kafka `refresh_interval`
-        meta_refresh_interval  = { type = "integer", minimum = 1, default = 30 },
+        producer_batch_size = {
+            type    = "integer",
+            minimum = 0,
+            default = 1048576,
+        },
+
+        producer_max_buffering = {
+            type    = "integer",
+            minimum = 1,
+            default = 50000,
+        },
+
+        -- seconds
+        producer_time_linger = {
+            type    = "integer",
+            minimum = 1,
+            default = 1,
+        },
+
+        -- seconds (APISIX docs say seconds; lua-resty-kafka expects ms, we convert)
+        meta_refresh_interval = {
+            type    = "integer",
+            minimum = 1,
+            default = 30,
+        },
     },
-    required = {"brokers", "kafka_topic"},
+
+    oneOf = {
+        {
+            required = { "broker_list", "kafka_topic" },
+        },
+        {
+            required = { "brokers", "kafka_topic" },
+        },
+    },
 }
 
 local metadata_schema = {
     type = "object",
     properties = {
-        log_format = { type = "object" },
+        log_format = {
+            type = "object",
+        },
+        max_pending_entries = {
+            type        = "integer",
+            description = "maximum number of pending entries in the batch processor",
+            minimum     = 1,
+        },
     },
 }
 
-----------------------------------------------------------------------
--- Module
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Module table
+--------------------------------------------------------------------------------
 
 local _M = {
-    version = 0.1,
-    priority = 403,
-    name = plugin_name,
-    schema = bp_manager:wrap_schema(schema),
+    version         = 0.1,
+    priority        = 403,
+    name            = plugin_name,
+    schema          = batch_processor_manager:wrap_schema(schema),
     metadata_schema = metadata_schema,
 }
 
-----------------------------------------------------------------------
--- Schema validation
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Schema check
+--------------------------------------------------------------------------------
 
 function _M.check_schema(conf, schema_type)
     if schema_type == core.schema.TYPE_METADATA then
@@ -231,11 +297,10 @@ function _M.check_schema(conf, schema_type)
 
     local ok, err = core.schema.check(schema, conf)
     if not ok then
-        core.log.error(LOG_PREFIX, "schema validation failed: ", err)
         return nil, err
     end
 
-    -- Optional: validate SSL paths exist when ssl=true
+    -- Optional: sanity-check SSL files if ssl is enabled
     if conf.ssl then
         if conf.ssl_ca_location then
             local f = io.open(conf.ssl_ca_location, "r")
@@ -248,7 +313,7 @@ function _M.check_schema(conf, schema_type)
         if conf.ssl_certificate_location then
             local f = io.open(conf.ssl_certificate_location, "r")
             if not f then
-                return nil, "SSL client cert file not found: " .. conf.ssl_certificate_location
+                return nil, "SSL client certificate file not found: " .. conf.ssl_certificate_location
             end
             f:close()
         end
@@ -262,77 +327,79 @@ function _M.check_schema(conf, schema_type)
         end
     end
 
-    local ok2, err2 = log_util.check_log_schema(conf)
-    if not ok2 then
-        return nil, err2
-    end
-
-    return true
+    return log_util.check_log_schema(conf)
 end
 
-----------------------------------------------------------------------
--- Helpers
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Helper: determine partition id (debug only)
+--------------------------------------------------------------------------------
 
 local function get_partition_id(prod, topic, log_message)
-    -- Try to map a log message to its Kafka partition (debug helper)
     if prod.async then
         local ringbuffer = prod.ringbuffer
-        if not ringbuffer or not ringbuffer.size or not ringbuffer.queue then
-            return nil
-        end
 
         for i = 1, ringbuffer.size, 3 do
-            if ringbuffer.queue[i] == topic and
-               ringbuffer.queue[i + 2] == log_message then
+            if ringbuffer.queue[i] == topic
+                and ringbuffer.queue[i + 2] == log_message
+            then
                 return math.floor(i / 3)
             end
         end
+
+        core.log.info("current topic in ringbuffer has no message")
         return nil
     end
 
+    -- sync mode
     local sendbuffer = prod.sendbuffer
-    if not sendbuffer or not sendbuffer.topics or not sendbuffer.topics[topic] then
+
+    if not sendbuffer.topics[topic] then
+        core.log.info("current topic in sendbuffer has no message")
         return nil
     end
 
-    for _, message in pairs(sendbuffer.topics[topic]) do
+    for i, message in pairs(sendbuffer.topics[topic]) do
         if log_message == message.queue[2] then
-            return 1
+            return i
         end
     end
-
-    return nil
 end
+
+--------------------------------------------------------------------------------
+-- Helper: create producer
+--------------------------------------------------------------------------------
 
 local function create_producer(broker_list, broker_config, cluster_name)
-    core.log.info(LOG_PREFIX, "create_producer: brokers=", #broker_list,
-                  ", cluster_name=", cluster_name or "nil",
-                  ", ssl=", broker_config.ssl or false)
-
-    local p, err = producer:new(broker_list, broker_config, cluster_name)
-    if not p then
-        core.log.error(LOG_PREFIX, "producer:new failed: ", err)
-        return nil, err
-    end
-
-    return p
+    core.log.info("create new kafka producer instance")
+    return producer:new(broker_list, broker_config, cluster_name)
 end
 
-local function send_kafka_data(conf, prod, log_message)
+--------------------------------------------------------------------------------
+-- Helper: send to Kafka
+--------------------------------------------------------------------------------
+
+local function send_kafka_data(conf, log_message, prod)
     local ok, err = prod:send(conf.kafka_topic, conf.key, log_message)
+
+    core.log.info(
+        "partition_id: ",
+        core.log.delay_exec(get_partition_id, prod, conf.kafka_topic, log_message)
+    )
+
     if not ok then
-        core.log.error(LOG_PREFIX, "failed to send data to Kafka: ", err,
-                       ", topic=", conf.kafka_topic, ", key=", conf.key)
-        return false, "failed to send to Kafka topic " .. conf.kafka_topic ..
-                      ": " .. (err or "unknown")
+        return false,
+            "failed to send data to Kafka topic: "
+                .. err
+                .. ", brokers: "
+                .. core.json.encode(conf.broker_list)
     end
+
     return true
 end
 
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- Phases
-----------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 function _M.access(conf, ctx)
     if conf.include_req_body then
@@ -342,9 +409,10 @@ function _M.access(conf, ctx)
             if not conf.request_expr then
                 local request_expr, err = expr.new(conf.include_req_body_expr)
                 if not request_expr then
-                    core.log.error(LOG_PREFIX, "generate request expr err: ", err)
+                    core.log.error("generate request expr err ", err)
                     return
                 end
+
                 conf.request_expr = request_expr
             end
 
@@ -365,6 +433,14 @@ function _M.body_filter(conf, ctx)
 end
 
 function _M.log(conf, ctx)
+    -- *** IMPORTANT: use APISIX batch processor correctly ***
+    local metadata = plugin.plugin_metadata(plugin_name)
+    local max_pending_entries =
+        metadata
+        and metadata.value
+        and metadata.value.max_pending_entries
+        or nil
+
     local entry
     if conf.meta_format == "origin" then
         entry = log_util.get_req_original(ctx, conf)
@@ -372,94 +448,88 @@ function _M.log(conf, ctx)
         entry = log_util.get_log_entry(plugin_name, conf, ctx)
     end
 
-    local added = bp_manager:add_entry(conf, entry)
-    if added then
+    if batch_processor_manager:add_entry(conf, entry, max_pending_entries) then
         return
     end
 
-    ------------------------------------------------------------------
-    -- Build broker_list and producer_config
-    ------------------------------------------------------------------
-    local broker_list = core.table.clone(conf.brokers or {})
-    if conf.broker_list then
-        for _, host_port in pairs(conf.broker_list) do
-            core.table.insert(broker_list, {
-                host = host_port.host,
-                port = host_port.port,
-            })
-        end
-    end
-
-    -- Apply global SASL -> per-broker sasl_config (if not present)
-    if conf.sasl and conf.sasl_username and conf.sasl_password then
-        for _, b in ipairs(broker_list) do
-            if not b.sasl_config then
-                b.sasl_config = {
-                    mechanism = conf.sasl_mechanism or "PLAIN",
-                    user      = conf.sasl_username,
-                    password  = conf.sasl_password,
-                }
-            end
-        end
-    end
-
+    ------------------------------------------------------------------------
+    -- Build broker list & broker_config (this is where we inject SSL)
+    ------------------------------------------------------------------------
+    -- reuse producer via lrucache to avoid unbalanced partitions of messages in kafka
+    local broker_list   = core.table.clone(conf.brokers or {})
     local broker_config = {}
 
-    -- timeouts in ms
-    broker_config.request_timeout = conf.timeout or 1000
+    if conf.broker_list then
+        for host, port in pairs(conf.broker_list) do
+            local broker = {
+                host = host,
+                port = port,
+            }
+            core.table.insert(broker_list, broker)
+        end
+    end
 
-    broker_config.producer_type   = conf.producer_type
-    broker_config.required_acks   = conf.required_acks
-    broker_config.batch_num       = conf.producer_batch_num
-    broker_config.batch_size      = conf.producer_batch_size
-    broker_config.max_buffering   = conf.producer_max_buffering
+    -- lua-resty-kafka expects ms for request_timeout/flush_time/refresh_interval
+    broker_config["request_timeout"]   = conf.timeout * 1000
+    broker_config["producer_type"]     = conf.producer_type
+    broker_config["required_acks"]     = conf.required_acks
+    broker_config["batch_num"]         = conf.producer_batch_num
+    broker_config["batch_size"]        = conf.producer_batch_size
+    broker_config["max_buffering"]     = conf.producer_max_buffering
+    broker_config["flush_time"]        = conf.producer_time_linger * 1000
+    broker_config["refresh_interval"]  = conf.meta_refresh_interval * 1000
 
-    -- APISIX uses seconds; lua-resty-kafka uses ms for flush_time
-    broker_config.flush_time      = (conf.producer_time_linger or 1) * 1000
+    -- NEW: SSL options propagated into client.socket_config → broker.lua
+    broker_config["ssl"]                   = conf.ssl or false
+    broker_config["ssl_verify"]            = conf.ssl_verify or false
+    broker_config["ssl_ca_location"]       = conf.ssl_ca_location
+    broker_config["ssl_certificate_location"] = conf.ssl_certificate_location
+    broker_config["ssl_key_location"]      = conf.ssl_key_location
+    broker_config["ssl_key_password"]      = conf.ssl_key_password
 
-    -- lua-resty-kafka expects seconds for refresh_interval
-    broker_config.refresh_interval = conf.meta_refresh_interval or 30
-
-    -- SSL options propagated into client.socket_config (via client.lua)
-    broker_config.ssl                 = conf.ssl or false
-    broker_config.ssl_verify          = conf.ssl_verify or false
-    broker_config.ssl_ca_location     = conf.ssl_ca_location
-    broker_config.ssl_certificate_location = conf.ssl_certificate_location
-    broker_config.ssl_key_location    = conf.ssl_key_location
-    broker_config.ssl_key_password    = conf.ssl_key_password
-
-    local prod, err = lrucache.plugin_ctx(
-        lrucache, ctx, nil, create_producer,
+    local prod, err = core.lrucache.plugin_ctx(
+        lrucache, ctx, nil,
+        create_producer,
         broker_list, broker_config, conf.cluster_name
     )
 
-    if not prod then
-        core.log.error(LOG_PREFIX, "failed to create kafka producer: ", err)
-        return
+    core.log.info(
+        "kafka cluster name ",
+        conf.cluster_name,
+        ", broker_list[1] port ",
+        prod and prod.client and prod.client.broker_list
+            and prod.client.broker_list[1]
+            and prod.client.broker_list[1].port or "nil"
+    )
+
+    if err then
+        return nil, "failed to identify the broker specified: " .. err
     end
 
+    -- Function executed by batch processor
     local func = function(entries, batch_max_size)
         local data, jerr
 
         if batch_max_size == 1 then
             data = entries[1]
             if type(data) ~= "string" then
-                data, jerr = core.json.encode(data)
+                data, jerr = core.json.encode(data) -- encode as single {}
             end
         else
-            data, jerr = core.json.encode(entries)
+            data, jerr = core.json.encode(entries) -- encode as array [{}]
         end
 
         if not data then
-            core.log.error(LOG_PREFIX, "failed to encode data: ", jerr)
-            return false, "encode error: " .. (jerr or "unknown")
+            return false, "error occurred while encoding the data: " .. jerr
         end
 
-        local ok2, send_err = send_kafka_data(conf, prod, data)
-        return ok2, send_err
+        core.log.info("send data to kafka: ", data)
+        return send_kafka_data(conf, data, prod)
     end
 
-    bp_manager:add_entry_to_new_processor(conf, entry, ctx, func)
+    batch_processor_manager:add_entry_to_new_processor(
+        conf, entry, ctx, func, max_pending_entries
+    )
 end
 
 return _M
