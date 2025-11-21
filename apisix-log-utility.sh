@@ -9,10 +9,47 @@ FLUSH_WAIT=5                                 # seconds to let logger flush
 BASE_SLEEP=900                               # 15 minutes base sleep (900 seconds)
 JITTER_MAX=300                               # add 0..300 sec random jitter (5 min)
 LOG_PATTERN="*.log"                          # Pattern to match log files
+KERBEROS_KEYTAB="/path/to/user.keytab"       # Keytab path - UPDATE THIS
+KERBEROS_PRINCIPAL="user@REALM.COM"          # Principal - UPDATE THIS
 
 # Absolute paths
 HDFS_BIN="$(command -v hdfs || true)"
+KINIT_BIN="$(command -v kinit || true)"
+KLIST_BIN="$(command -v klist || true)"
 : "${HDFS_BIN:?hdfs CLI not found in PATH}"
+
+# -------- KERBEROS FUNCTIONS --------
+check_kerberos_ticket() {
+    if $KLIST_BIN -s 2>/dev/null; then
+        echo "[$(date -Is)] Kerberos TGT is valid"
+        return 0
+    else
+        echo "[$(date -Is)] Kerberos TGT is expired or not found"
+        return 1
+    fi
+}
+
+renew_kerberos_ticket() {
+    echo "[$(date -Is)] Renewing Kerberos TGT..."
+    if [[ -f "$KERBEROS_KEYTAB" ]]; then
+        if $KINIT_BIN -kt "$KERBEROS_KEYTAB" "$KERBEROS_PRINCIPAL"; then
+            echo "[$(date -Is)] Successfully renewed TGT using keytab"
+            return 0
+        else
+            echo "[$(date -Is)] ERROR: Failed to renew TGT using keytab"
+            return 1
+        fi
+    else
+        echo "[$(date -Is)] ERROR: Keytab not found at $KERBEROS_KEYTAB"
+        return 1
+    fi
+}
+
+ensure_kerberos_ticket() {
+    if ! check_kerberos_ticket; then
+        renew_kerberos_ticket
+    fi
+}
 
 # -------- PRECHECKS --------
 # Ensure log directory exists
@@ -21,6 +58,9 @@ if [ ! -d "$LOG_DIR" ]; then
     mkdir -p "$LOG_DIR"
     chmod 755 "$LOG_DIR"
 fi
+
+# Initial Kerberos authentication
+ensure_kerberos_ticket
 
 # Ensure HDFS base dir exists
 $HDFS_BIN dfs -mkdir -p "$HDFS_BASE_DIR" || true
@@ -138,6 +178,9 @@ echo "[$(date -Is)] Configuration: Check every $((BASE_SLEEP/60)) minutes"
 while true; do
     cycle_start=$(date +%s)
     echo "[$(date -Is)] === Starting new processing cycle ==="
+    
+    # Check Kerberos ticket before each cycle
+    ensure_kerberos_ticket
     
     # Process all logs
     if combine_and_process_logs; then
