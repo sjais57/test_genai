@@ -88,7 +88,8 @@ discover_log_files() {
 # Function to combine all log files into one
 combine_and_process_logs() {
     # Generate base timestamp for this cycle
-    local base_ts=$(date -u +%Y%m%dT%H%M%SZ)
+    local base_ts
+    base_ts=$(date -u +%Y%m%dT%H%M%SZ)
     local hdfs_file="${HDFS_BASE_DIR}/combined_${base_ts}.log"
     local hdfs_tmp="${hdfs_file}.tmp"
     local combined_snap="/tmp/combined_log_${base_ts}.log"
@@ -115,7 +116,8 @@ combine_and_process_logs() {
         if [ -r "$log_file" ] && [ -f "$log_file" ]; then
             local size=0
             size=$(wc -c < "$log_file" 2>/dev/null || echo 0)
-            local log_name=$(basename "$log_file")
+            local log_name
+            log_name=$(basename "$log_file")
             
             if [ "$size" -gt 0 ]; then
                 # File has content
@@ -143,12 +145,21 @@ combine_and_process_logs() {
     # Add footer with summary
     echo "=== CYCLE_END: $(date -Is), TOTAL_SIZE: ${total_size} bytes, FILES_WITH_CONTENT: ${files_with_content}/${#current_log_files[@]} ===" >> "$combined_snap"
     
-    # ALWAYS upload to HDFS, even if all files were empty
+    # <<< NEW: Skip HDFS upload if all logs were empty >>>
+    if [ "$files_with_content" -eq 0 ] || [ "$total_size" -eq 0 ]; then
+        echo "[$(date -Is)] No non-empty .log files this cycle; skipping HDFS upload"
+        rm -f "$combined_snap"
+        return 0
+    fi
+    # <<< NEW ENDS >>>
+
+    # Upload to HDFS only when there is some data
     echo "[$(date -Is)] Uploading to HDFS: ${total_size} bytes from ${files_with_content} files with content"
     
     # Check if the snapshot file exists and has some content (at least headers)
     if [ -f "$combined_snap" ]; then
-        local final_size=$(wc -c < "$combined_snap" 2>/dev/null || echo 0)
+        local final_size
+        final_size=$(wc -c < "$combined_snap" 2>/dev/null || echo 0)
         echo "[$(date -Is)] Combined file size: ${final_size} bytes"
         
         if $HDFS_BIN dfs -put "$combined_snap" "$hdfs_tmp" 2>/dev/null; then
