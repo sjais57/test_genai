@@ -1,26 +1,53 @@
-curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 \
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/llm4mdd-triton-text-generation \
   -H "X-API-KEY: edd1c9f034335f136f87ad84b625c8f1" \
   -d '{
-    "uri": "/your-endpoint",
+    "uri": "/llm4mdd/triton/generate",
     "plugins": {
       "file-logger": {
-        "path": "/usr/local/apisix/logs/access.log",
-        "log_format": {
-          "@timestamp": "$time_iso8601",
-          "client_ip": "$remote_addr",
-          "method": "$request_method",
-          "uri": "$uri",
-          "status": "$status",
-          "request_body": "$request_body",
-          "response_body": "$response_body",
-          "request_time": "$request_time"
+        "path": "/usr/local/apisix/logs/llm4mdd.log",
+        "batch_max_size": 1,
+        "include_resp_body": true,
+        "include_req_body": true,
+        "include_resp_body_expr": [
+          ["status", ">=", 200],
+          ["status", "<=", 599]
+        ],
+        "include_req_body_expr": [
+          ["status", ">=", 200],
+          ["status", "<=", 599]
+        ],
+        "custom_logs": {
+          "before_log": [
+            "return function(ctx, plugin_conf)
+              -- Remove sensitive headers from request
+              local req_headers = ctx.var.request_headers
+              if req_headers then
+                req_headers.authorization = nil
+                req_headers.Authorization = nil
+                req_headers.jwt = nil
+                req_headers.JWT = nil
+                req_headers['x-decrypted-token'] = nil
+                req_headers['X-Decrypted-Token'] = nil
+              end
+              
+              -- Also remove from response headers if needed
+              local resp_headers = ctx.var.response_headers
+              if resp_headers then
+                resp_headers.authorization = nil
+                resp_headers.Authorization = nil
+              end
+              
+              return true
+            end"
+          ]
         }
       }
     },
     "upstream": {
       "type": "roundrobin",
       "nodes": {
-        "backend-service:8080": 1
-      }
+        "client_ip:443": 1
+      },
+      "scheme": "https"
     }
   }'
