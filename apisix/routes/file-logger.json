@@ -1,0 +1,26 @@
+curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/1 \
+  -H "X-API-KEY: edd1c9f034335f136f87ad84b625c8f1" \
+  -d '{
+    "uri": "/your-endpoint",
+    "plugins": {
+      "file-logger": {
+        "path": "/usr/local/apisix/logs/access.log",
+        "log_format": {
+          "@timestamp": "$time_iso8601",
+          "client_ip": "$remote_addr",
+          "method": "$request_method",
+          "uri": "$uri",
+          "status": "$status",
+          "request_body": "$request_body",
+          "response_body": "$response_body",
+          "request_time": "$request_time"
+        }
+      }
+    },
+    "upstream": {
+      "type": "roundrobin",
+      "nodes": {
+        "backend-service:8080": 1
+      }
+    }
+  }'
