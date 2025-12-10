@@ -5,55 +5,26 @@ curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/llm4mdd-triton-text-genera
     "uri": "/llm4mdd/triton/generate",
     "plugins": {
       "file-logger": {
-        "path": "/usr/local/apisix/logs/llm4mdd.log",
+        "path": "/usr/local/apisix/logs/llm4mdd_debug.log",
         "batch_max_size": 1,
 
         "include_req_body": true,
         "include_resp_body": true,
 
-        "include_req_body_expr": [
-          [
-            ["status", ">=", 200],
-            ["status", "<=", 599]
-          ]
-        ],
-        "include_resp_body_expr": [
-          [
-            ["status", ">=", 200],
-            ["status", "<=", 599]
-          ]
-        ],
-
         "log_format": {
-          "time": "$time_iso8601",
-          "request_uri": "$uri",
-  "request_url": "$scheme://$host$uri",
-  "request_size": "$request_length",
-  "request_method": "$request_method",
-  "request_querystring": "$args",
-  "request_host": "$host",
-  "request_x_request_id": "$http_x_request_id",
-  "response_status": "$status",
-  "response_size": "$body_bytes_sent",
-  "upstream": "$upstream_addr",
-  "upstream_latency": "$upstream_response_time",
-  "apisix_latency": "$request_time",
-  "client_ip": "$remote_addr",
-  "server": "$server_addr",
-  "hostname": "$hostname",
-  "version": "3.12.0",
-  "req_body": "$request_body",
-  "resp_body": "$resp_body"
-          "route_id": "$route_id",
-          "client_ip": "$remote_addr",
-          "method": "$request_method",
-          "uri": "$uri",
-          "status": "$status",
-          "req_size": "$request_length",
-          "resp_size": "$body_bytes_sent",
-          "req_body": "$request_body",
-          "resp_body": "$resp_body",
-          "user_agent": "$http_user_agent"
+          "ALL_VARS": "$host $uri $request_method $status $request_length $body_bytes_sent",
+
+          "REQUEST_BODY": "$request_body",
+          "RESPONSE_BODY": "$resp_body",
+
+          "REQ_CONTENT_TYPE": "$http_content_type",
+          "REQ_CONTENT_LENGTH": "$http_content_length",
+
+          "RESP_CONTENT_TYPE": "$sent_http_content_type",
+          "RESP_CONTENT_LENGTH": "$sent_http_content_length",
+
+          "REQ_TOTAL_BYTES": "$request_length",
+          "RESP_BODY_BYTES": "$body_bytes_sent"
         }
       }
     },
