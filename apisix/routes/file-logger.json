@@ -1,45 +1,41 @@
 curl -X PUT http://127.0.0.1:9180/apisix/admin/routes/llm4mdd-triton-text-generation \
   -H "X-API-KEY: edd1c9f034335f136f87ad84b625c8f1" \
+  -H "Content-Type: application/json" \
   -d '{
     "uri": "/llm4mdd/triton/generate",
     "plugins": {
       "file-logger": {
         "path": "/usr/local/apisix/logs/llm4mdd.log",
         "batch_max_size": 1,
-        "include_resp_body": true,
+
         "include_req_body": true,
-        "include_resp_body_expr": [
-          ["status", ">=", 200],
-          ["status", "<=", 599]
-        ],
+        "include_resp_body": true,
+
         "include_req_body_expr": [
-          ["status", ">=", 200],
-          ["status", "<=", 599]
-        ],
-        "custom_logs": {
-          "before_log": [
-            "return function(ctx, plugin_conf)
-              -- Remove sensitive headers from request
-              local req_headers = ctx.var.request_headers
-              if req_headers then
-                req_headers.authorization = nil
-                req_headers.Authorization = nil
-                req_headers.jwt = nil
-                req_headers.JWT = nil
-                req_headers['x-decrypted-token'] = nil
-                req_headers['X-Decrypted-Token'] = nil
-              end
-              
-              -- Also remove from response headers if needed
-              local resp_headers = ctx.var.response_headers
-              if resp_headers then
-                resp_headers.authorization = nil
-                resp_headers.Authorization = nil
-              end
-              
-              return true
-            end"
+          [
+            ["status", ">=", 200],
+            ["status", "<=", 599]
           ]
+        ],
+        "include_resp_body_expr": [
+          [
+            ["status", ">=", 200],
+            ["status", "<=", 599]
+          ]
+        ],
+
+        "log_format": {
+          "time": "$time_iso8601",
+          "route_id": "$route_id",
+          "client_ip": "$remote_addr",
+          "method": "$request_method",
+          "uri": "$uri",
+          "status": "$status",
+          "req_size": "$request_length",
+          "resp_size": "$body_bytes_sent",
+          "req_body": "$request_body",
+          "resp_body": "$resp_body",
+          "user_agent": "$http_user_agent"
         }
       }
     },
