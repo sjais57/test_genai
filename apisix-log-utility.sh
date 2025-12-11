@@ -8,7 +8,7 @@ HDFS_BASE_DIR="/user/hdfs/apisix/logs"       # Base HDFS directory
 FLUSH_WAIT=5                                 # seconds to let logger flush
 BASE_SLEEP=900                               # 15 minutes base sleep (900 seconds)
 JITTER_MAX=300                               # add 0..300 sec random jitter (5 min)
-LOG_PATTERN="*.log"                          # Pattern to match log files
+LOG_PATTERN="test.log"                       # <<< CHANGED: only process test.log
 KERBEROS_KEYTAB="/path/to/user.keytab"       # Keytab path - UPDATE THIS
 KERBEROS_PRINCIPAL="user@REALM.COM"          # Principal - UPDATE THIS
 
@@ -71,11 +71,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Function to discover log files
+# Function to discover log files (now effectively just LOG_DIR/test.log)
 discover_log_files() {
     local log_files=()
     
-    # Find all .log files in the log directory
     if [ -d "$LOG_DIR" ]; then
         while IFS= read -r -d '' file; do
             log_files+=("$file")
@@ -102,16 +101,23 @@ combine_and_process_logs() {
     # Wait for flush
     sleep "$FLUSH_WAIT"
     
-    # Discover log files
+    # Discover log files (should only be test.log)
     mapfile -t current_log_files < <(discover_log_files)
-    
+
+    # <<< NEW: If test.log is missing, skip this cycle entirely >>>
+    if [ "${#current_log_files[@]}" -eq 0 ]; then
+        echo "[$(date -Is)] No $LOG_PATTERN found in $LOG_DIR; skipping HDFS upload for this cycle"
+        return 0
+    fi
+    # <<< NEW ENDS >>>
+
     # Create fresh combined snapshot file
     > "$combined_snap"
     
     # Add header with cycle information
     echo "=== CYCLE_START: $(date -Is), LOG_FILES_FOUND: ${#current_log_files[@]} ===" >> "$combined_snap"
     
-    # Process each log file
+    # Process each log file (in practice, only test.log)
     for log_file in "${current_log_files[@]}"; do
         if [ -r "$log_file" ] && [ -f "$log_file" ]; then
             local size=0
@@ -145,13 +151,13 @@ combine_and_process_logs() {
     # Add footer with summary
     echo "=== CYCLE_END: $(date -Is), TOTAL_SIZE: ${total_size} bytes, FILES_WITH_CONTENT: ${files_with_content}/${#current_log_files[@]} ===" >> "$combined_snap"
     
-    # <<< NEW: Skip HDFS upload if all logs were empty >>>
+    # <<< IMPORTANT: Skip HDFS upload if test.log had no data >>>
     if [ "$files_with_content" -eq 0 ] || [ "$total_size" -eq 0 ]; then
-        echo "[$(date -Is)] No non-empty .log files this cycle; skipping HDFS upload"
+        echo "[$(date -Is)] No non-empty $LOG_PATTERN this cycle; skipping HDFS upload"
         rm -f "$combined_snap"
         return 0
     fi
-    # <<< NEW ENDS >>>
+    # <<< END >>>
 
     # Upload to HDFS only when there is some data
     echo "[$(date -Is)] Uploading to HDFS: ${total_size} bytes from ${files_with_content} files with content"
