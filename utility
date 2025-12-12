@@ -2,204 +2,219 @@
 set -euo pipefail
 umask 022
 
-# ---------------- CONFIG ----------------
-LOG_DIR="/var/logs"                          # Directory to monitor
-LOG_PATTERN="test.log"                       # Only process this file in LOG_DIR
-
+# -------- CONFIG --------
+LOG_DIR="/var/logs"                          # Directory to monitor for log files
 HDFS_BASE_DIR="/user/hdfs/apisix/logs"       # Base HDFS directory
+FLUSH_WAIT=5                                 # seconds to let logger flush
+BASE_SLEEP=900                               # 15 minutes base sleep (900 seconds)
+JITTER_MAX=300                               # add 0..300 sec random jitter (5 min)
+LOG_PATTERN="test.log"                       # <<< CHANGED: only process test.log
+KERBEROS_KEYTAB="/path/to/user.keytab"       # Keytab path - UPDATE THIS
+KERBEROS_PRINCIPAL="user@REALM.COM"          # Principal - UPDATE THIS
 
-FLUSH_WAIT=5                                 # Seconds to let logger flush
-BASE_SLEEP=900                               # 15 minutes
-JITTER_MAX=300                               # Add 0..300 sec random jitter
-
-KERBEROS_KEYTAB="/path/to/user.keytab"       # UPDATE THIS
-KERBEROS_PRINCIPAL="user@REALM.COM"          # UPDATE THIS
-
-# ---------------- BINARIES ----------------
+# Absolute paths
 HDFS_BIN="$(command -v hdfs || true)"
 KINIT_BIN="$(command -v kinit || true)"
 KLIST_BIN="$(command -v klist || true)"
+: "${HDFS_BIN:?hdfs CLI not found in PATH}"
 
-: "${HDFS_BIN:?ERROR: hdfs CLI not found in PATH}"
-: "${KINIT_BIN:?ERROR: kinit not found in PATH}"
-: "${KLIST_BIN:?ERROR: klist not found in PATH}"
-
-log() { echo "[$(date -Is)] $*"; }
-
-# ---------------- KERBEROS ----------------
+# -------- KERBEROS FUNCTIONS --------
 check_kerberos_ticket() {
-  if "$KLIST_BIN" -s 2>/dev/null; then
-    log "Kerberos TGT is valid"
-    return 0
-  else
-    log "Kerberos TGT is expired or not found"
-    return 1
-  fi
+    if $KLIST_BIN -s 2>/dev/null; then
+        echo "[$(date -Is)] Kerberos TGT is valid"
+        return 0
+    else
+        echo "[$(date -Is)] Kerberos TGT is expired or not found"
+        return 1
+    fi
 }
 
 renew_kerberos_ticket() {
-  log "Renewing Kerberos TGT..."
-  if [[ -f "$KERBEROS_KEYTAB" ]]; then
-    if "$KINIT_BIN" -kt "$KERBEROS_KEYTAB" "$KERBEROS_PRINCIPAL"; then
-      log "Successfully renewed TGT using keytab"
-      return 0
+    echo "[$(date -Is)] Renewing Kerberos TGT..."
+    if [[ -f "$KERBEROS_KEYTAB" ]]; then
+        if $KINIT_BIN -kt "$KERBEROS_KEYTAB" "$KERBEROS_PRINCIPAL"; then
+            echo "[$(date -Is)] Successfully renewed TGT using keytab"
+            return 0
+        else
+            echo "[$(date -Is)] ERROR: Failed to renew TGT using keytab"
+            return 1
+        fi
     else
-      log "ERROR: Failed to renew TGT using keytab"
-      return 1
+        echo "[$(date -Is)] ERROR: Keytab not found at $KERBEROS_KEYTAB"
+        return 1
     fi
-  else
-    log "ERROR: Keytab not found at $KERBEROS_KEYTAB"
-    return 1
-  fi
 }
 
 ensure_kerberos_ticket() {
-  if ! check_kerberos_ticket; then
-    renew_kerberos_ticket
-  fi
+    if ! check_kerberos_ticket; then
+        renew_kerberos_ticket
+    fi
 }
 
-# ---------------- PRECHECKS ----------------
-if [[ ! -d "$LOG_DIR" ]]; then
-  log "Log directory $LOG_DIR does not exist. Creating it."
-  mkdir -p "$LOG_DIR"
-  chmod 755 "$LOG_DIR"
+# -------- PRECHECKS --------
+# Ensure log directory exists
+if [ ! -d "$LOG_DIR" ]; then
+    echo "[$(date -Is)] ERROR: Log directory $LOG_DIR does not exist. Creating it."
+    mkdir -p "$LOG_DIR"
+    chmod 755 "$LOG_DIR"
 fi
 
+# Initial Kerberos authentication
 ensure_kerberos_ticket
 
-"$HDFS_BIN" dfs -mkdir -p "$HDFS_BASE_DIR" >/dev/null 2>&1 || true
-"$HDFS_BIN" dfs -chmod 755 "$HDFS_BASE_DIR" >/dev/null 2>&1 || true
+# Ensure HDFS base dir exists
+$HDFS_BIN dfs -mkdir -p "$HDFS_BASE_DIR" || true
+$HDFS_BIN dfs -chmod 755 "$HDFS_BASE_DIR" || true
 
-cleanup() {
-  rm -f /tmp/combined_log_*.log 2>/dev/null || true
+cleanup() { 
+    rm -f /tmp/combined_log_*.log 2>/dev/null || true 
 }
 trap cleanup EXIT
 
-# Discover log files (effectively LOG_DIR/test.log)
+# Function to discover log files (now effectively just LOG_DIR/test.log)
 discover_log_files() {
-  local files=()
-  if [[ -d "$LOG_DIR" ]]; then
-    while IFS= read -r -d '' f; do
-      files+=("$f")
-    done < <(find "$LOG_DIR" -maxdepth 1 -name "$LOG_PATTERN" -type f -print0 2>/dev/null)
-  fi
-  printf '%s\n' "${files[@]}"
+    local log_files=()
+    
+    if [ -d "$LOG_DIR" ]; then
+        while IFS= read -r -d '' file; do
+            log_files+=("$file")
+        done < <(find "$LOG_DIR" -maxdepth 1 -name "$LOG_PATTERN" -type f -print0 2>/dev/null)
+    fi
+    
+    printf '%s\n' "${log_files[@]}"
 }
 
-# ---------------- MAIN WORK ----------------
+# Function to combine all log files into one
 combine_and_process_logs() {
-  local base_ts hdfs_file hdfs_tmp combined_snap
-  base_ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  hdfs_file="${HDFS_BASE_DIR}/combined_${base_ts}.log"
-  hdfs_tmp="${hdfs_file}.tmp"
-  combined_snap="/tmp/combined_log_${base_ts}.log"
+    # Generate base timestamp for this cycle
+    local base_ts
+    base_ts=$(date -u +%Y%m%dT%H%M%SZ)
+    local hdfs_file="${HDFS_BASE_DIR}/combined_${base_ts}.log"
+    local hdfs_tmp="${hdfs_file}.tmp"
+    local combined_snap="/tmp/combined_log_${base_ts}.log"
+    
+    local total_size=0
+    local has_content=false
+    
+    echo "[$(date -Is)] Starting log processing cycle $base_ts"
+    
+    # Wait for flush
+    sleep "$FLUSH_WAIT"
+    
+    # Discover log files (should only be test.log)
+    mapfile -t current_log_files < <(discover_log_files)
 
-  local total_size=0
-  local files_with_content=0
-
-  log "Starting log processing cycle $base_ts"
-  sleep "$FLUSH_WAIT"
-
-  mapfile -t current_log_files < <(discover_log_files)
-
-  # If test.log is missing, skip the cycle
-  if [[ "${#current_log_files[@]}" -eq 0 ]]; then
-    log "No $LOG_PATTERN found in $LOG_DIR; skipping HDFS upload for this cycle"
-    return 0
-  fi
-
-  # Start fresh combined snapshot
-  : > "$combined_snap"
-  echo "=== CYCLE_START: $(date -Is), LOG_FILES_FOUND: ${#current_log_files[@]} ===" >> "$combined_snap"
-
-  for log_file in "${current_log_files[@]}"; do
-    local log_name
-    log_name="$(basename "$log_file")"
-
-    if [[ -r "$log_file" && -f "$log_file" ]]; then
-      # IMPORTANT: Treat whitespace-only as empty
-      if ! grep -q '[^[:space:]]' "$log_file" 2>/dev/null; then
-        log "$log_name: empty/whitespace-only; nothing to upload"
-        : > "$log_file" 2>/dev/null || log "WARNING: Could not truncate $log_file"
-        echo "=== [FILE: $log_name, STATUS: EMPTY_OR_WHITESPACE] ===" >> "$combined_snap"
-        continue
-      fi
-
-      local size
-      size="$(wc -c < "$log_file" 2>/dev/null || echo 0)"
-
-      echo "=== [FILE: $log_name, SIZE: ${size} bytes] ===" >> "$combined_snap"
-      cat "$log_file" >> "$combined_snap" 2>/dev/null || echo "ERROR: Failed to read $log_name" >> "$combined_snap"
-      echo "" >> "$combined_snap"
-
-      files_with_content=$((files_with_content + 1))
-      total_size=$((total_size + size))
-      log "Added content from $log_name: ${size} bytes"
-
-      # Truncate after reading
-      : > "$log_file" 2>/dev/null || log "WARNING: Could not truncate $log_file"
-    else
-      log "ERROR: Cannot read log file $log_file"
-      echo "=== [FILE: $log_name, STATUS: UNREADABLE] ===" >> "$combined_snap"
+    # If test.log is missing, skip this cycle entirely
+    if [ "${#current_log_files[@]}" -eq 0 ]; then
+        echo "[$(date -Is)] No $LOG_PATTERN found in $LOG_DIR; skipping HDFS upload for this cycle"
+        return 0
     fi
-  done
 
-  echo "=== CYCLE_END: $(date -Is), TOTAL_SIZE: ${total_size} bytes, FILES_WITH_CONTENT: ${files_with_content}/${#current_log_files[@]} ===" >> "$combined_snap"
-
-  # If no meaningful content, do NOT create anything in HDFS
-  if [[ "$files_with_content" -eq 0 || "$total_size" -eq 0 ]]; then
-    log "No non-empty $LOG_PATTERN content this cycle; skipping HDFS upload"
-    rm -f "$combined_snap" 2>/dev/null || true
-    return 0
-  fi
-
-  local final_size
-  final_size="$(wc -c < "$combined_snap" 2>/dev/null || echo 0)"
-  log "Uploading to HDFS (combined file size: ${final_size} bytes) -> $hdfs_file"
-
-  # Atomic-ish upload: put -> mv tmp -> final
-  if "$HDFS_BIN" dfs -put "$combined_snap" "$hdfs_tmp" >/dev/null 2>&1; then
-    if "$HDFS_BIN" dfs -mv "$hdfs_tmp" "$hdfs_file" >/dev/null 2>&1; then
-      "$HDFS_BIN" dfs -chmod 644 "$hdfs_file" >/dev/null 2>&1 || true
-      log "SUCCESS: Created hdfs://$hdfs_file"
-      rm -f "$combined_snap" 2>/dev/null || true
-      return 0
-    else
-      log "ERROR: Failed to rename temporary HDFS file"
-      "$HDFS_BIN" dfs -rm "$hdfs_tmp" >/dev/null 2>&1 || true
-      return 1
+    # Create fresh combined snapshot file
+    > "$combined_snap"
+    
+    # Add header with cycle information
+    echo "=== CYCLE_START: $(date -Is), LOG_FILES_FOUND: ${#current_log_files[@]} ===" >> "$combined_snap"
+    
+    # Process each log file (in practice, only test.log)
+    for log_file in "${current_log_files[@]}"; do
+        if [ -r "$log_file" ] && [ -f "$log_file" ]; then
+            local size=0
+            size=$(wc -c < "$log_file" 2>/dev/null || echo 0)
+            local log_name
+            log_name=$(basename "$log_file")
+            
+            if [ "$size" -gt 0 ]; then
+                # File has content
+                echo "=== [FILE: $log_name, SIZE: ${size} bytes] ===" >> "$combined_snap"
+                cat "$log_file" >> "$combined_snap" 2>/dev/null || echo "ERROR: Failed to read $log_name" >> "$combined_snap"
+                echo "" >> "$combined_snap"  # Add newline separator
+                has_content=true
+                echo "[$(date -Is)] Added content from $log_name: ${size} bytes"
+            else
+                # File is empty
+                echo "=== [FILE: $log_name, STATUS: EMPTY] ===" >> "$combined_snap"
+                echo "[$(date -Is)] $log_name: empty, no content to add"
+            fi
+            
+            # Always truncate the source log file
+            > "$log_file" 2>/dev/null || echo "[$(date -Is)] WARNING: Could not truncate $log_file"
+            total_size=$((total_size + size))
+            
+        else
+            echo "[$(date -Is)] ERROR: Cannot read log file $log_file"
+            echo "=== [FILE: $(basename "$log_file" 2>/dev/null || echo "unknown"), STATUS: UNREADABLE] ===" >> "$combined_snap"
+        fi
+    done
+    
+    # Add footer with summary
+    echo "=== CYCLE_END: $(date -Is), TOTAL_SIZE: ${total_size} bytes, HAS_CONTENT: ${has_content} ===" >> "$combined_snap"
+    
+    # Check if test.log had any data (skip HDFS upload if empty)
+    if [ "$has_content" = false ] || [ "$total_size" -eq 0 ]; then
+        echo "[$(date -Is)] $LOG_PATTERN had no data this cycle; skipping HDFS upload"
+        rm -f "$combined_snap"
+        return 0
     fi
-  else
-    log "ERROR: HDFS upload failed"
-    return 1
-  fi
+
+    # Upload to HDFS only when there is data in test.log
+    echo "[$(date -Is)] Uploading to HDFS: ${total_size} bytes from $LOG_PATTERN"
+    
+    # Check if the snapshot file exists and has some content (at least headers)
+    if [ -f "$combined_snap" ]; then
+        local final_size
+        final_size=$(wc -c < "$combined_snap" 2>/dev/null || echo 0)
+        echo "[$(date -Is)] Combined file size: ${final_size} bytes"
+        
+        if $HDFS_BIN dfs -put "$combined_snap" "$hdfs_tmp" 2>/dev/null; then
+            if $HDFS_BIN dfs -mv "$hdfs_tmp" "$hdfs_file" 2>/dev/null; then
+                $HDFS_BIN dfs -chmod 644 "$hdfs_file" 2>/dev/null || true
+                echo "[$(date -Is)] SUCCESS: Created hdfs://$hdfs_file"
+                rm -f "$combined_snap"
+                return 0
+            else
+                echo "[$(date -Is)] ERROR: Failed to rename temporary HDFS file"
+                $HDFS_BIN dfs -rm "$hdfs_tmp" 2>/dev/null || true
+                return 1
+            fi
+        else
+            echo "[$(date -Is)] ERROR: HDFS upload failed"
+            return 1
+        fi
+    else
+        echo "[$(date -Is)] ERROR: Combined snapshot file was not created"
+        return 1
+    fi
 }
 
-log "Starting 15-minute log copy loop for directory: $LOG_DIR"
-log "Configuration: Check every $((BASE_SLEEP / 60)) minutes (plus 0..$((JITTER_MAX / 60)) min jitter)"
+echo "[$(date -Is)] Starting 15-minute log copy loop for directory: $LOG_DIR"
+echo "[$(date -Is)] Configuration: Check every $((BASE_SLEEP/60)) minutes"
 
 while true; do
-  local_start="$(date +%s)"
-  log "=== Starting new processing cycle ==="
-
-  ensure_kerberos_ticket
-
-  if combine_and_process_logs; then
-    log "Cycle completed successfully"
-  else
-    log "Cycle completed with errors"
-  fi
-
-  local_end="$(date +%s)"
-  cycle_duration=$((local_end - local_start))
-  total_sleep=$((BASE_SLEEP + (RANDOM % (JITTER_MAX + 1))))
-
-  if [[ "$cycle_duration" -lt "$total_sleep" ]]; then
-    actual_sleep=$((total_sleep - cycle_duration))
-    log "Next cycle in $((actual_sleep / 60)) minutes, $((actual_sleep % 60)) seconds"
-    sleep "$actual_sleep"
-  else
-    log "Cycle took longer than interval; starting next cycle immediately"
-  fi
+    cycle_start=$(date +%s)
+    echo "[$(date -Is)] === Starting new processing cycle ==="
+    
+    # Check Kerberos ticket before each cycle
+    ensure_kerberos_ticket
+    
+    # Process all logs
+    if combine_and_process_logs; then
+        echo "[$(date -Is)] Cycle completed successfully"
+    else
+        echo "[$(date -Is)] Cycle completed with errors"
+    fi
+    
+    # Calculate sleep time
+    cycle_end=$(date +%s)
+    cycle_duration=$((cycle_end - cycle_start))
+    total_sleep=$((BASE_SLEEP + (RANDOM % (JITTER_MAX + 1))))
+    
+    # Adjust sleep time based on cycle duration
+    if [ $cycle_duration -lt $total_sleep ]; then
+        actual_sleep=$((total_sleep - cycle_duration))
+        echo "[$(date -Is)] Next cycle in $((actual_sleep / 60)) minutes, $((actual_sleep % 60)) seconds"
+        sleep $actual_sleep
+    else
+        echo "[$(date -Is)] Cycle took longer than interval, starting next cycle immediately"
+    fi
 done
