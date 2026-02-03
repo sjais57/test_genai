@@ -6,9 +6,7 @@ CST_TZ = pytz.timezone("US/Central")
 def _parse_dd_mm_yyyy(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%d-%m-%Y")
 
-# -------------------------------------------------------
-# TIME WINDOW CHECK (DETAILED)
-# -------------------------------------------------------
+
 if start_time and end_time:
     try:
         now_cst = datetime.now(CST_TZ)
@@ -45,8 +43,6 @@ if start_time and end_time:
             "message": "Invalid START_TIME / END_TIME configuration"
         }
 
-
-    return start_dt <= now_cst <= end_dt
 
 
 # --- Defaults ---
