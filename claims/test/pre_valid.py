@@ -6,15 +6,45 @@ CST_TZ = pytz.timezone("US/Central")
 def _parse_dd_mm_yyyy(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%d-%m-%Y")
 
-def _is_within_time_window(start_date: str, end_date: str) -> bool:
-    now_cst = datetime.now(CST_TZ)
+# -------------------------------------------------------
+# TIME WINDOW CHECK (DETAILED)
+# -------------------------------------------------------
+if start_time and end_time:
+    try:
+        now_cst = datetime.now(CST_TZ)
 
-    start_dt = CST_TZ.localize(
-        datetime.combine(_parse_dd_mm_yyyy(start_date), time.min)
-    )
-    end_dt = CST_TZ.localize(
-        datetime.combine(_parse_dd_mm_yyyy(end_date), time.max)
-    )
+        start_dt = CST_TZ.localize(
+            datetime.combine(_parse_dd_mm_yyyy(start_time), time.min)
+        )
+        end_dt = CST_TZ.localize(
+            datetime.combine(_parse_dd_mm_yyyy(end_time), time.max)
+        )
+
+        if now_cst < start_dt:
+            return {
+                "valid": False,
+                "message": "Project has not been started",
+                "start_time": start_time,
+                "current_time_cst": now_cst.strftime("%d-%m-%Y %H:%M:%S")
+            }
+
+        if now_cst > end_dt:
+            return {
+                "valid": False,
+                "message": "Project expired",
+                "end_time": end_time,
+                "current_time_cst": now_cst.strftime("%d-%m-%Y %H:%M:%S")
+            }
+
+        # else → within window, continue validation
+
+    except Exception as e:
+        logger.error(f"Invalid START_TIME / END_TIME: {str(e)}")
+        return {
+            "valid": False,
+            "message": "Invalid START_TIME / END_TIME configuration"
+        }
+
 
     return start_dt <= now_cst <= end_dt
 
